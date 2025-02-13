@@ -9,15 +9,15 @@ The equivariant imaging loss is presented in `"Equivariant Imaging: Learning Bey
 
 """
 
-import deepinv as dinv
-from torch.utils.data import DataLoader
-import torch
 from pathlib import Path
+import torch
+from torch.utils.data import DataLoader
 from torchvision import transforms
-from deepinv.optim.prior import PnP
-from deepinv.utils.demo import load_dataset, load_degradation
-from deepinv.training_utils import train, test
-from deepinv.models.denoiser import online_weights_path
+
+import deepinv as dinv
+from deepinv.datasets import SimpleFastMRISliceDataset
+from deepinv.utils.demo import get_data_home, load_degradation, demo_mri_model
+from deepinv.models.utils import get_weights_url
 
 # %%
 # Setup paths for data loading and results.
@@ -25,10 +25,7 @@ from deepinv.models.denoiser import online_weights_path
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
-RESULTS_DIR = BASE_DIR / "results"
-DEG_DIR = BASE_DIR / "degradations"
 CKPT_DIR = BASE_DIR / "ckpts"
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
@@ -39,8 +36,18 @@ device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 # %%
 # Load base image datasets and degradation operators.
 # ----------------------------------------------------------------------------------
-# In this example, we use a subset of the single-coil `FastMRI dataset <https://fastmri.org/>`_
-# as the base image dataset. It consists of 973 knee images of size 320x320.
+# In this example, we use a mini demo subset of the single-coil `FastMRI dataset <https://fastmri.org/>`_
+# as the base image dataset, consisting of 2 knee images of size 320x320.
+#
+# .. seealso::
+#
+#   Datasets :class:`deepinv.datasets.FastMRISliceDataset` :class:`deepinv.datasets.SimpleFastMRISliceDataset`
+#       We provide convenient datasets to easily load both raw and reconstructed FastMRI images.
+#       You can download more data on the `FastMRI site <https://fastmri.med.nyu.edu/>`_.
+#
+# .. important::
+#
+#    By using this dataset, you confirm that you have agreed to and signed the `FastMRI data use agreement <https://fastmri.med.nyu.edu/>`_.
 #
 # .. note::
 #
@@ -48,16 +55,15 @@ device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 #
 
 operation = "MRI"
-train_dataset_name = "fastmri_knee_singlecoil"
 img_size = 128
 
 transform = transforms.Compose([transforms.Resize(img_size)])
 
-train_dataset = load_dataset(
-    train_dataset_name, ORIGINAL_DATA_DIR, transform, train=True
+train_dataset = SimpleFastMRISliceDataset(
+    get_data_home(), transform=transform, train_percent=0.5, train=True, download=True
 )
-test_dataset = load_dataset(
-    train_dataset_name, ORIGINAL_DATA_DIR, transform, train=False
+test_dataset = SimpleFastMRISliceDataset(
+    get_data_home(), transform=transform, train_percent=0.5, train=False
 )
 
 # %%
@@ -66,21 +72,20 @@ test_dataset = load_dataset(
 #
 #
 
-mask = load_degradation("mri_mask_128x128.npy", ORIGINAL_DATA_DIR)
+mask = load_degradation("mri_mask_128x128.npy")
 
 # defined physics
 physics = dinv.physics.MRI(mask=mask, device=device)
 
-# Use parallel dataloader if using a GPU to fasten training,
+# Use parallel dataloader if using a GPU to speed up training,
 # otherwise, as all computes are on CPU, use synchronous data loading.
 num_workers = 4 if torch.cuda.is_available() else 0
 n_images_max = (
     900 if torch.cuda.is_available() else 5
 )  # number of images used for training
-# (the dataset has up to 973 images, however here we use only 900)
 
 my_dataset_name = "demo_equivariant_imaging"
-measurement_dir = DATA_DIR / train_dataset_name / operation
+measurement_dir = DATA_DIR / "fastmri" / operation
 deepinv_datasets_path = dinv.datasets.generate_dataset(
     train_dataset=train_dataset,
     test_dataset=test_dataset,
@@ -100,50 +105,11 @@ test_dataset = dinv.datasets.HDF5Dataset(path=deepinv_datasets_path, train=False
 # ---------------------------------------------------------------
 #
 # As a reconstruction network, we use an unrolled network (half-quadratic splitting)
-# with a trainable denoising prior based on the DnCNN architecture.
+# with a trainable denoising prior based on the DnCNN architecture as an example
+# of a model-based deep learning architecture from `MoDL <https://ieeexplore.ieee.org/document/8434321>`_.
+# See :func:`deepinv.utils.demo.demo_mri_model` for details.
 
-# Select the data fidelity term
-data_fidelity = dinv.optim.L2()
-n_channels = 2  # real + imaginary parts
-
-# If the prior dict value is initialized with a table of length max_iter, then a distinct model is trained for each
-# iteration. For fixed trained model prior across iterations, initialize with a single model.
-prior = PnP(
-    denoiser=dinv.models.DnCNN(
-        in_channels=n_channels,
-        out_channels=n_channels,
-        pretrained=None,
-        train=True,
-        depth=7,
-    ).to(device)
-)
-
-# Unrolled optimization algorithm parameters
-max_iter = 3  # number of unfolded layers
-lamb = [1.0] * max_iter  # initialization of the regularization parameter
-stepsize = [1.0] * max_iter  # initialization of the step sizes.
-sigma_denoiser = [0.01] * max_iter  # initialization of the denoiser parameters
-params_algo = {  # wrap all the restoration parameters in a 'params_algo' dictionary
-    "stepsize": stepsize,
-    "g_param": sigma_denoiser,
-    "lambda": lamb,
-}
-
-trainable_params = [
-    "lambda",
-    "stepsize",
-    "g_param",
-]  # define which parameters from 'params_algo' are trainable
-
-# Define the unfolded trainable model.
-model = dinv.unfolded.unfolded_builder(
-    "HQS",
-    params_algo=params_algo,
-    trainable_params=trainable_params,
-    data_fidelity=data_fidelity,
-    max_iter=max_iter,
-    prior=prior,
-)
+model = demo_mri_model(device=device)
 
 
 # %%
@@ -156,10 +122,12 @@ model = dinv.unfolded.unfolded_builder(
 # Here we use the group of 4 rotations of 90 degrees, as the accelerated MRI acquisition is
 # not equivariant to rotations (while it is equivariant to translations).
 #
+# See :ref:`docs <transform>` for full list of available transforms.
+#
 # .. note::
 #
 #       We use a pretrained model to reduce training time. You can get the same results by training from scratch
-#       for 150 epochs.
+#       for 150 epochs using a larger knee dataset of ~1000 images.
 
 epochs = 1  # choose training epochs
 learning_rate = 5e-4
@@ -167,18 +135,19 @@ batch_size = 16 if torch.cuda.is_available() else 1
 
 # choose self-supervised training losses
 # generates 4 random rotations per image in the batch
-losses = [dinv.loss.MCLoss(), dinv.loss.EILoss(dinv.transform.Rotate(4))]
+losses = [dinv.loss.MCLoss(), dinv.loss.EILoss(dinv.transform.Rotate(n_trans=4))]
 
 # choose optimizer and scheduler
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-8)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8) + 1)
 
 # start with a pretrained model to reduce training time
-url = online_weights_path() + "new_demo_ei_ckp_150_v3.pth"
+file_name = "new_demo_ei_ckp_150_v3.pth"
+url = get_weights_url(model_name="demo", file_name=file_name)
 ckpt = torch.hub.load_state_dict_from_url(
     url,
     map_location=lambda storage, loc: storage,
-    file_name="new_demo_ei_ckp_150_v3.pth",
+    file_name=file_name,
 )
 # load a checkpoint to reduce training time
 model.load_state_dict(ckpt["state_dict"])
@@ -187,7 +156,6 @@ optimizer.load_state_dict(ckpt["optimizer"])
 # %%
 # Train the network
 # --------------------------------------------
-#
 #
 
 
@@ -201,23 +169,25 @@ test_dataloader = DataLoader(
     test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False
 )
 
-train(
-    model=model,
-    train_dataloader=train_dataloader,
-    eval_dataloader=test_dataloader,
+# Initialize the trainer
+trainer = dinv.Trainer(
+    model,
+    physics=physics,
     epochs=epochs,
     scheduler=scheduler,
     losses=losses,
-    physics=physics,
     optimizer=optimizer,
+    train_dataloader=train_dataloader,
+    plot_images=True,
     device=device,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
     wandb_vis=wandb_vis,
-    log_interval=1,
-    eval_interval=1,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     ckp_interval=10,
 )
+
+model = trainer.train()
 
 # %%
 # Test the network
@@ -225,16 +195,4 @@ train(
 #
 #
 
-plot_images = True
-method = "equivariant_imaging"
-
-test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
-)
+trainer.test(test_dataloader)

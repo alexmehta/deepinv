@@ -46,30 +46,65 @@ class SinglePixelCamera(DecomposablePhysics):
     If ``fast=False``, the operator is a random iid binary matrix with equal probability of :math:`1/\sqrt{m}` or
     :math:`-1/\sqrt{m}`.
 
-    Both options allow for an efficient singular value decomposition (see :meth:`deepinv.physics.DecomposablePhysics`)
+    Both options allow for an efficient singular value decomposition (see :class:`deepinv.physics.DecomposablePhysics`)
     The operator is always applied independently across channels.
 
     It is recommended to use ``fast=True`` for image sizes bigger than 32 x 32, since the forward computation with
     ``fast=False`` has an :math:`O(mn)` complexity, whereas with ``fast=True`` it has an :math:`O(n \log n)` complexity.
 
     An existing operator can be loaded from a saved ``.pth`` file via ``self.load_state_dict(save_path)``,
-    in a similar fashion to :meth:`torch.nn.Module`.
+    in a similar fashion to :class:`torch.nn.Module`.
 
-    :param int m: number of single pixel measurements per acquisition.
+    :param int m: number of single pixel measurements per acquisition (m).
     :param tuple img_shape: shape (C, H, W) of images.
     :param bool fast: The operator is iid binary if false, otherwise A is a 2D subsampled hadamard transform.
     :param str device: Device to store the forward matrix.
+    :param torch.Generator rng: (optional) a pseudorandom random number generator for the parameter generation.
+        If ``None``, the default Generator of PyTorch will be used.
+
+    |sep|
+
+    :Examples:
+
+        SinglePixelCamera operators with 16 binary patterns for 32x32 image:
+
+        >>> from deepinv.physics import SinglePixelCamera
+        >>> seed = torch.manual_seed(0) # Random seed for reproducibility
+        >>> x = torch.randn((1, 1, 32, 32)) # Define random 32x32 image
+        >>> physics = SinglePixelCamera(m=16, img_shape=(1, 32, 32), fast=True)
+        >>> torch.sum(physics.mask).item() # Number of measurements
+        48.0
+        >>> torch.round(physics(x)[:, :, :3, :3]).abs() # Compute measurements
+        tensor([[[[1., 0., 0.],
+                  [0., 0., 0.],
+                  [0., 0., 0.]]]])
 
     """
 
     def __init__(
-        self, m, img_shape, fast=True, device="cpu", dtype=torch.float32, **kwargs
+        self,
+        m,
+        img_shape,
+        fast=True,
+        device="cpu",
+        dtype=torch.float32,
+        rng: torch.Generator = None,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.name = f"spcamera_m{m}"
         self.img_shape = img_shape
         self.fast = fast
         self.device = device
+        if rng is None:
+            self.rng = torch.Generator(device=device)
+        else:
+            # Make sure that the random generator is on the same device as the physic generator
+            assert rng.device == torch.device(
+                device
+            ), f"The random generator is not on the same device as the Physics Generator. Got random generator on {rng.device} and the Physics Generator on {self.device}."
+            self.rng = rng
+        self.initial_random_state = self.rng.get_state()
 
         if self.fast:
             C, H, W = img_shape
@@ -88,22 +123,26 @@ class SinglePixelCamera(DecomposablePhysics):
                     mask[0, :, revi[i], revj[j]] = 1
 
             mask = mask.to(device)
-            self.mask = torch.nn.Parameter(mask, requires_grad=False)
 
         else:
             n = int(np.prod(img_shape[1:]))
-            A = torch.ones((m, n), device=device)
-            A[torch.randn_like(A) > 0.5] = -1.0
+            A = torch.where(
+                torch.randn((m, n), device=device, dtype=dtype, generator=self.rng)
+                > 0.5,
+                -1.0,
+                1.0,
+            )
             A /= np.sqrt(m)  # normalize
             u, mask, vh = torch.linalg.svd(A, full_matrices=False)
 
-            self.mask = mask.to(device).unsqueeze(0).type(dtype)
+            mask = mask.to(device).unsqueeze(0).type(dtype)
             self.vh = vh.to(device).type(dtype)
             self.u = u.to(device).type(dtype)
 
             self.u = torch.nn.Parameter(self.u, requires_grad=False)
             self.vh = torch.nn.Parameter(self.vh, requires_grad=False)
-            self.mask = torch.nn.Parameter(self.mask, requires_grad=False)
+
+        self.mask = torch.nn.Parameter(mask, requires_grad=False)
 
     def V_adjoint(self, x):
         if self.fast:

@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from .utils import get_weights_url
+from .base import Denoiser
 
 
 class StudentGrad(nn.Module):
@@ -11,23 +13,22 @@ class StudentGrad(nn.Module):
         return self.model(x, sigma)
 
 
-class GSPnP(nn.Module):
+class GSPnP(Denoiser):
     r"""
     Gradient Step module to use a denoiser architecture as a Gradient Step Denoiser.
     See https://arxiv.org/pdf/2110.03220.pdf.
     Code from https://github.com/samuro95/GSPnP.
 
-    :param nn.Module denoiser: Denoiser model.
+    :param torch.nn.Module denoiser: Denoiser model.
     :param float alpha: Relaxation parameter
     """
 
-    def __init__(self, denoiser, alpha=1.0, train=False):
+    def __init__(self, denoiser, alpha=1.0):
         super().__init__()
         self.student_grad = StudentGrad(denoiser)
         self.alpha = alpha
-        self.train = train
 
-    def potential(self, x, sigma):
+    def potential(self, x, sigma, *args, **kwargs):
         N = self.student_grad(x, sigma)
         return (
             0.5
@@ -35,22 +36,20 @@ class GSPnP(nn.Module):
             * torch.norm((x - N).view(x.shape[0], -1), p=2, dim=-1) ** 2
         )
 
-    def potential_grad(self, x, sigma):
+    def potential_grad(self, x, sigma, *args, **kwargs):
         r"""
         Calculate :math:`\nabla g` the gradient of the regularizer :math:`g` at input :math:`x`.
 
-        :param torch.tensor x: Input image
+        :param torch.Tensor x: Input image
         :param float sigma: Denoiser level :math:`\sigma` (std)
         """
-        torch.set_grad_enabled(True)
-        x = x.float()
-        x = x.requires_grad_()
-        N = self.student_grad(x, sigma)
-        JN = torch.autograd.grad(
-            N, x, grad_outputs=x - N, create_graph=True, only_inputs=True
-        )[0]
-        if not self.train:
-            torch.set_grad_enabled(False)
+        with torch.enable_grad():
+            x = x.float()
+            x = x.requires_grad_()
+            N = self.student_grad(x, sigma)
+            JN = torch.autograd.grad(
+                N, x, grad_outputs=x - N, create_graph=True, only_inputs=True
+            )[0]
         Dg = x - N - JN
         return self.alpha * Dg
 
@@ -58,7 +57,7 @@ class GSPnP(nn.Module):
         r"""
         Denoising with Gradient Step Denoiser
 
-        :param torch.tensor x: Input image
+        :param torch.Tensor x: Input image
         :param float sigma: Denoiser level (std)
         """
         Dg = self.potential_grad(x, sigma)
@@ -74,7 +73,6 @@ def GSDRUNet(
     nc=[64, 128, 256, 512],
     act_mode="E",
     pretrained=None,
-    train=False,
     device=torch.device("cpu"),
 ):
     """
@@ -94,7 +92,7 @@ def GSDRUNet(
         using Pytorch's default initialization. If ``pretrained='download'``, the weights will be downloaded from an
         online repository (only available for the default architecture).
         Finally, ``pretrained`` can also be set as a path to the user's own pretrained weights.
-    :param bool train: training or testing mode.
+        See :ref:`pretrained-weights <pretrained-weights>` for more details.
     :param str device: gpu or cpu.
 
     """
@@ -107,70 +105,25 @@ def GSDRUNet(
         nc=nc,
         act_mode=act_mode,
         pretrained=None,
-        train=train,
         device=device,
     )
-    GSmodel = GSPnP(denoiser, alpha=alpha, train=train)
+    GSmodel = GSPnP(denoiser, alpha=alpha)
     if pretrained:
         if pretrained == "download":
-            url = "https://mycore.core-cloud.net/index.php/s/9EzDqcJxQUJKYul/download?path=%2Fweights&files=GSDRUNet.ckpt"
+            url = get_weights_url(
+                model_name="gradientstep", file_name="GSDRUNet_torch.ckpt"
+            )
             ckpt = torch.hub.load_state_dict_from_url(
                 url,
                 map_location=lambda storage, loc: storage,
-                file_name="GSDRUNet.ckpt",
-            )["state_dict"]
+                file_name="GSDRUNet_torch.ckpt",
+            )
         else:
-            ckpt = torch.load(pretrained, map_location=lambda storage, loc: storage)[
-                "state_dict"
-            ]
+            ckpt = torch.load(pretrained, map_location=lambda storage, loc: storage)
+
+        if "state_dict" in ckpt:
+            ckpt = ckpt["state_dict"]
+
         GSmodel.load_state_dict(ckpt, strict=False)
-    return GSmodel
-
-
-def ProxDRUNet(
-    alpha=1.0,
-    in_channels=4,
-    out_channels=3,
-    nb=2,
-    nc=[64, 128, 256, 512],
-    act_mode="s",
-    pretrained=None,
-    train=False,
-    device=torch.device("cpu"),
-):
-    """
-    Proximal Gradient Step Denoiser with DRUNet architecture
-
-    :param float alpha: Relaxation parameter
-    :param int in_channels: Number of input channels
-    :param int out_channels: Number of output channels
-    :param int nb: Number of blocks in the DRUNet
-    :param list nc: Number of channels in the DRUNet
-    """
-    from deepinv.models.drunet import DRUNet
-
-    denoiser = DRUNet(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        nb=nb,
-        nc=nc,
-        act_mode=act_mode,
-        pretrained=None,
-        train=train,
-        device=device,
-    )
-    GSmodel = GSPnP(denoiser, alpha=alpha, train=train)
-    if pretrained:
-        if pretrained == "download":
-            url = "https://mycore.core-cloud.net/index.php/s/9EzDqcJxQUJKYul/download?path=%2Fweights&files=Prox-DRUNet.ckpt"
-            ckpt = torch.hub.load_state_dict_from_url(
-                url,
-                map_location=lambda storage, loc: storage,
-                file_name="ProxDRUNet.ckpt",
-            )["state_dict"]
-        else:
-            ckpt = torch.load(pretrained, map_location=lambda storage, loc: storage)[
-                "state_dict"
-            ]
-        GSmodel.load_state_dict(ckpt, strict=False)
+        GSmodel.eval()
     return GSmodel

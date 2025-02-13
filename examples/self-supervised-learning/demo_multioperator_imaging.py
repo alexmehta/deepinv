@@ -21,14 +21,15 @@ where :math:`R_{\theta}` is a reconstruction network with parameters :math:`\the
 
 """
 
-import deepinv as dinv
-from torch.utils.data import DataLoader
-import torch
 from pathlib import Path
-from torchvision import transforms
-from deepinv.models.denoiser import online_weights_path
-from deepinv.training_utils import train, test
-from torchvision import datasets
+
+import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+import deepinv as dinv
+from deepinv.utils.demo import get_data_home
+from deepinv.models.utils import get_weights_url
 
 # %%
 # Setup paths for data loading and results.
@@ -36,11 +37,9 @@ from torchvision import datasets
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
-RESULTS_DIR = BASE_DIR / "results"
-DEG_DIR = BASE_DIR / "degradations"
 CKPT_DIR = BASE_DIR / "ckpts"
+ORIGINAL_DATA_DIR = get_data_home()
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
 torch.manual_seed(0)
@@ -56,10 +55,10 @@ device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 transform = transforms.Compose([transforms.ToTensor()])
 
 train_base_dataset = datasets.MNIST(
-    root="../datasets/", train=True, transform=transform, download=True
+    root=ORIGINAL_DATA_DIR, train=True, transform=transform, download=True
 )
 test_base_dataset = datasets.MNIST(
-    root="../datasets/", train=False, transform=transform, download=True
+    root=ORIGINAL_DATA_DIR, train=False, transform=transform, download=True
 )
 
 # %%
@@ -150,9 +149,10 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8) + 1)
 
 # start with a pretrained model to reduce training time
-url = online_weights_path() + "demo_moi_ckp_10.pth"
+file_name = "demo_moi_ckp_10.pth"
+url = get_weights_url(model_name="demo", file_name=file_name)
 ckpt = torch.hub.load_state_dict_from_url(
-    url, map_location=lambda storage, loc: storage, file_name="demo_moi_ckp_10.pth"
+    url, map_location=lambda storage, loc: storage, file_name=file_name
 )
 # load a checkpoint to reduce training time
 model.load_state_dict(ckpt["state_dict"])
@@ -177,40 +177,31 @@ test_dataloader = [
     for dataset in test_dataset
 ]
 
-train(
+# Initialize the trainer
+trainer = dinv.Trainer(
     model=model,
-    train_dataloader=train_dataloader,
-    eval_dataloader=test_dataloader,
     epochs=epochs,
     scheduler=scheduler,
     losses=losses,
-    physics=physics,
     optimizer=optimizer,
+    physics=physics,
     device=device,
+    train_dataloader=train_dataloader,
+    eval_dataloader=test_dataloader,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
+    plot_images=True,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     wandb_vis=wandb_vis,
-    log_interval=1,
-    eval_interval=1,
     ckp_interval=10,
 )
+
+# Train the network
+model = trainer.train()
 
 # %%
 # Test the network
 # --------------------------------------------
 #
-#
 
-plot_images = True
-method = "multioperator_imaging"
-
-test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
-)
+trainer.test(test_dataloader)

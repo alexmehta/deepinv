@@ -1,14 +1,15 @@
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.utils import _pair, _quadruple
+from .base import Denoiser
 
 # code adapted from https://gist.github.com/rwightman/f2d3849281624be7c0f11c85c87c1598
 
 
-class MedianFilter(nn.Module):
+class MedianFilter(Denoiser):
     r"""
     Median filter.
 
+    It computes the median value of a sliding window over the input tensor. The window is defined by the kernel size.
 
     :param int kernel_size: size of pooling kernel, int or 2-tuple
     :param padding: pool padding, int or 4-tuple (l, r, t, b) as in pytorch F.pad
@@ -42,7 +43,7 @@ class MedianFilter(nn.Module):
             padding = self.padding
         return padding
 
-    def forward(self, x, sigma=None):
+    def forward(self, x, sigma=None, **kwargs):
         # using existing pytorch functions and tensor ops so that we get autograd,
         # would likely be more efficient to implement from scratch at C/Cuda level
         x = F.pad(x, self._padding(x), mode="reflect")

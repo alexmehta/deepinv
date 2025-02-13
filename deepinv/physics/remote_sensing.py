@@ -1,12 +1,13 @@
 from deepinv.physics.noise import GaussianNoise
-from deepinv.physics.forward import LinearPhysics
+from deepinv.physics.forward import StackedLinearPhysics
 from deepinv.physics.blur import Downsampling
 from deepinv.physics.range import Decolorize
-from deepinv.utils import TensorList
+from deepinv.optim.utils import conjugate_gradient
+from deepinv.utils.tensorlist import TensorList
 
 
-class Pansharpen(LinearPhysics):
-    """
+class Pansharpen(StackedLinearPhysics):
+    r"""
     Pansharpening forward operator.
 
     The measurements consist of a high resolution grayscale image and a low resolution RGB image, and
@@ -18,70 +19,105 @@ class Pansharpen(LinearPhysics):
 
     It is possible to assign a different noise model to the RGB and grayscale images.
 
-    Example usage:
-
-    ::
-
-        import deepinv
-        import torch
-
-        x = torch.randn(1, 3, 256, 256)
-        physics = deepinv.physics.Pansharpen(img_size=x.shape[1:], device=x.device)
-
-        y = physics(x) # returns a TensorList with the RGB and grayscale images
-
-        x_adj = physics.A_adjoint(y)
-        x_pinv = physics.A_dagger(y)
-
-        deepinv.utils.plot([y[0], y[1], x_adj, x_pinv, x], titles=['low res color', 'high res gray',
-                                                                  'A_adjoint', 'A_dagger', 'x'])
-
-    :param tuple[int] img_size: size of the input image.
-    :param int factor: downsampling factor.
+    :param tuple[int] img_size: size of the high-resolution multispectral input image, must be of shape (C, H, W).
+    :param torch.Tensor, str, None filter: Downsampling filter. It can be 'gaussian', 'bilinear' or 'bicubic' or a
+        custom ``torch.Tensor`` filter. If ``None``, no filtering is applied.
+    :param int factor: downsampling factor/ratio.
+    :param str, tuple, list srf: spectral response function of the decolorize operator to produce grayscale from multispectral.
+        See :class:`deepinv.physics.Decolorize` for parameter options. Defaults to ``flat`` i.e. simply average the bands.
+    :param bool use_brovey: if ``True``, use the `Brovey method <https://ieeexplore.ieee.org/document/6998089>`_
+        to compute the pansharpening, otherwise use the conjugate gradient method.
     :param torch.nn.Module noise_color: noise model for the RGB image.
     :param torch.nn.Module noise_gray: noise model for the grayscale image.
-    :param torch.Tensor, str, NoneType filter: Downsampling filter. It can be 'gaussian', 'bilinear' or 'bicubic' or a
-        custom ``torch.Tensor`` filter. If ``None``, no filtering is applied.
+    :param torch.device, str device: torch device.
     :param str padding: options are ``'valid'``, ``'circular'``, ``'replicate'`` and ``'reflect'``.
         If ``padding='valid'`` the blurred output is smaller than the image (no padding)
         otherwise the blurred output has the same size as the image.
+
+    |sep|
+
+    :Examples:
+
+        Pansharpen operator applied to a random 32x32 image:
+
+        >>> from deepinv.physics import Pansharpen
+        >>> import torch
+        >>> x = torch.randn(1, 3, 32, 32) # Define random 32x32 color image
+        >>> physics = Pansharpen(img_size=x.shape[1:], device=x.device)
+        >>> x.shape
+        torch.Size([1, 3, 32, 32])
+        >>> y = physics(x)
+        >>> y[0].shape
+        torch.Size([1, 3, 8, 8])
+        >>> y[1].shape
+        torch.Size([1, 1, 32, 32])
+
     """
 
     def __init__(
         self,
         img_size,
+        filter="bilinear",
         factor=4,
+        srf="flat",
         noise_color=GaussianNoise(sigma=0.0),
         noise_gray=GaussianNoise(sigma=0.05),
-        filter="gaussian",
+        use_brovey=True,
         device="cpu",
         padding="circular",
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(**kwargs)
+        assert len(img_size) == 3, "img_size must be of shape (C,H,W)"
 
-        self.downsampling = Downsampling(
+        noise_color = noise_color if noise_color is not None else lambda x: x
+        noise_gray = noise_gray if noise_gray is not None else lambda x: x
+        self.use_brovey = use_brovey
+
+        downsampling = Downsampling(
             img_size=img_size,
             factor=factor,
             filter=filter,
+            noise_model=noise_color,
             device=device,
             padding=padding,
         )
-
-        self.noise_color = noise_color
-        self.noise_gray = noise_gray
-        self.colorize = Decolorize()
-
-    def A(self, x):
-        return TensorList([self.downsampling(x), self.colorize(x)])
-
-    def A_adjoint(self, y):
-        return self.downsampling.A_adjoint(y[0]) + self.colorize.A_adjoint(y[1])
-
-    def forward(self, x):
-        return TensorList(
-            [self.noise_color(self.downsampling(x)), self.noise_gray(self.colorize(x))]
+        decolorize = Decolorize(
+            srf=srf, noise_model=noise_gray, channels=img_size[0], device=device
         )
+
+        super().__init__(physics_list=[downsampling, decolorize], **kwargs)
+
+        # Set convenience attributes
+        self.downsampling = downsampling
+        self.decolorize = decolorize
+
+    def A_dagger(self, y: TensorList, **kwargs):
+        """
+        If the Brovey method is used, compute the classical Brovey solution, otherwise compute the conjugate gradient solution.
+
+        See `review paper <https://ieeexplore.ieee.org/document/6998089>`_ for details.
+
+        :param deepinv.utils.TensorList y: input tensorlist of (MS, PAN)
+        :return: Tensor of image pan-sharpening using the Brovey method.
+        """
+
+        if self.use_brovey:
+            if self.downsampling.filter is not None:
+                factor = self.downsampling.factor**2
+            else:
+                factor = 1
+
+            x = self.downsampling.A_adjoint(y[0], **kwargs) * factor
+            x *= y[1] / x.mean(1, keepdim=True)
+        else:
+            A = lambda x: self.A_A_adjoint(x)
+            b = y
+            x = conjugate_gradient(
+                A=A, b=b, max_iter=self.max_iter, tol=self.tol, eps=0.1
+            )
+            x = self.A_adjoint(x)
+
+        return x
 
 
 # test code

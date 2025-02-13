@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from deepinv.loss import MCLoss
+from deepinv.loss.mc import MCLoss
 from tqdm import tqdm
+from .base import Reconstructor
 
 
 def add_module(self, module):
@@ -24,7 +25,6 @@ class ConvDecoder(nn.Module):
     :param tuple in_size: size of the input vector.
     :param int layers: number of layers in the network.
     :param int channels: number of channels in the network.
-
     """
 
     #  Code adapted from https://github.com/MLI-lab/ConvDecoder/tree/master by Darestani and Heckel.
@@ -82,10 +82,16 @@ class ConvDecoder(nn.Module):
         self.net.add(nn.Conv2d(channels, output_channels, 1, 1, padding=0, bias=True))
 
     def forward(self, x, scale_out=1):
+        r"""
+        Forward pass through the ConvDecoder network.
+
+        :param torch.Tensor x: Input tensor.
+        :param float scale_out: Output scaling factor.
+        """
         return self.net(x) * scale_out
 
 
-class DeepImagePrior(torch.nn.Module):
+class DeepImagePrior(Reconstructor):
     r"""
 
     Deep Image Prior reconstruction.
@@ -96,9 +102,9 @@ class DeepImagePrior(torch.nn.Module):
 
     .. math::
 
-        \min_{\theta}  \|y-Af_{\theta}(z)\|^2
+        \min_{\theta}  \|y-AG_{\theta}(z)\|^2
 
-    where :math:`z` is a random input and :math:`f_{\theta}` is a convolutional decoder network with parameters
+    where :math:`z` is a random input and :math:`G_{\theta}` is a convolutional decoder network with parameters
     :math:`\theta`. The minimization should be stopped early to avoid overfitting. The method uses the Adam
     optimizer.
 
@@ -114,7 +120,7 @@ class DeepImagePrior(torch.nn.Module):
         values may not be optimal for all problems. We recommend experimenting with different values.
 
     :param torch.nn.Module generator: Convolutional decoder network.
-    :param list, tuple input_size: Size (C,H,W) of the input noise vector :math:`z`.
+    :param list, tuple input_size: Size `(C,H,W)` of the input noise vector :math:`z`.
     :param int iterations: Number of optimization iterations.
     :param float learning_rate: Learning rate of the Adam optimizer.
     :param bool verbose: If ``True``, print progress.
@@ -140,7 +146,7 @@ class DeepImagePrior(torch.nn.Module):
         self.re_init = re_init
         self.input_size = input_size
 
-    def forward(self, y, physics):
+    def forward(self, y, physics, **kwargs):
         r"""
         Reconstruct an image from the measurement :math:`y`. The reconstruction is performed by solving a minimiza
         problem.

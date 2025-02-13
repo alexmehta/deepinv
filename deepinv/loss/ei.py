@@ -1,8 +1,13 @@
+from typing import Union
+
 import torch
 import torch.nn as nn
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
 
 
-class EILoss(nn.Module):
+class EILoss(Loss):
     r"""
     Equivariant imaging self-supervised loss.
 
@@ -22,26 +27,30 @@ class EILoss(nn.Module):
     By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
     can be used as well.
 
-    :param deepinv.Transform, torchvision.transforms transform: Transform to generate the virtually
-        augmented measurement. It can be any torch-differentiable function (e.g., a ``torch.nn.Module``).
-    :param torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
         image.
     :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
         :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
         otherwise is generated as :math:`\forw{\hat{x}}`.
     :param float weight: Weight of the loss.
-    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``True``.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
     """
 
     def __init__(
         self,
-        transform,
-        metric=torch.nn.MSELoss(),
+        transform: Transform,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
         apply_noise=True,
         weight=1.0,
-        no_grad=True,
+        no_grad=False,
+        *args,
+        **kwargs,
     ):
-        super(EILoss, self).__init__()
+        super(EILoss, self).__init__(*args, **kwargs)
         self.name = "ei"
         self.metric = metric
         self.weight = weight
@@ -56,12 +65,16 @@ class EILoss(nn.Module):
         :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
         :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
         :param torch.nn.Module model: Reconstruction function.
-        :return: (torch.Tensor) loss.
+        :return: (:class:`torch.Tensor`) loss.
         """
 
         if self.no_grad:
+            # NOTE: Calling both torch.no_grad() and detach() is not redundant.
+            # One avoids unnecessary computations and makes the code more efficient
+            # while the other ensures that x2 is marked as a leaf in the computational graph.
             with torch.no_grad():
                 x2 = self.T(x_net)
+                x2 = x2.detach()
         else:
             x2 = self.T(x_net)
 

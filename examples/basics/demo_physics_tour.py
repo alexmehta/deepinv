@@ -8,26 +8,25 @@ We restrict ourselves to operators where the signal is a 2D image. The full list
 
 """
 
+import torch
+
 import deepinv as dinv
 from deepinv.utils.plotting import plot
-import torch
-import requests
-from imageio.v2 import imread
-from io import BytesIO
+from deepinv.utils.demo import load_url_image, get_image_url
+
 
 # %%
 # Load image from the internet
 # ----------------------------
 #
-# This example uses the logo of the CNRS.
+# This example uses an image of the CBSD68 dataset.
 
 device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
 
-url = "https://www-iuem.univ-brest.fr/intranet/communication/logos/tutelles-iuem/cnrs/cnrs-poster.png"
-res = requests.get(url)
-x = imread(BytesIO(res.content)) / 255.0
+url = get_image_url("CBSD_0010.png")
+x = load_url_image(url, grayscale=False).to(device)
 
-x = torch.tensor(x, device=device, dtype=torch.float).permute(2, 0, 1).unsqueeze(0)
+x = torch.tensor(x, device=device, dtype=torch.float)
 x = torch.nn.functional.interpolate(x, size=(64, 64))
 img_size = x.shape[1:]
 # Set the global random seed from pytorch to ensure reproducibility of the example.
@@ -68,6 +67,21 @@ y = physics(x)
 # plot results
 plot([x, y], titles=["signal", "measurement"])
 
+
+# %%
+# Demosaicing
+# ---------------------------------------
+#
+# The demosaicing class :class:`deepinv.physics.Demosaicing` is associated with a Bayer pattern,
+# which is a color filter array used in digital cameras (see `Wikipedia <https://en.wikipedia.org/wiki/Bayer_filter>`_).
+
+physics = dinv.physics.Demosaicing(img_size=(64, 64), device=device)
+
+y = physics(x)
+
+# plot results
+plot([x, y], titles=["signal", "measurement"])
+
 # %%
 # Compressed Sensing
 # ---------------------------------------
@@ -76,7 +90,12 @@ plot([x, y], titles=["signal", "measurement"])
 # Here we take 2048 measurements of an image of size 64x64, which corresponds to a compression ratio of 2.
 
 physics = dinv.physics.CompressedSensing(
-    m=2048, fast=False, channelwise=True, img_shape=img_size, device=device
+    m=2048,
+    fast=False,
+    channelwise=True,
+    img_shape=img_size,
+    compute_inverse=True,
+    device=device,
 )
 
 y = physics(x)
@@ -138,13 +157,38 @@ plot(
 )
 
 # %%
+#
+# We also provide physics generators for various accelerated MRI masks.
+# These are Cartesian sampling strategies and can be used for static (k) and dynamic (k-t) undersampling:
+
+from deepinv.physics.generator import (
+    GaussianMaskGenerator,
+    RandomMaskGenerator,
+    EquispacedMaskGenerator,
+)
+
+# shape (C, T, H, W)
+mask_gaussian = GaussianMaskGenerator((2, 8, 64, 50), acceleration=4).step()["mask"]
+mask_uniform = EquispacedMaskGenerator((2, 8, 64, 50), acceleration=4).step()["mask"]
+mask_random = RandomMaskGenerator((2, 8, 64, 50), acceleration=4).step()["mask"]
+
+plot(
+    [
+        mask_gaussian[:, :, 0, ...],
+        mask_uniform[:, :, 0, ...],
+        mask_random[:, :, 0, ...],
+    ],
+    titles=["Gaussian", "Uniform", "Random uniform"],
+)
+
+# %%
 # Decolorize
 # ---------------------------------------
 #
 # The class :class:`deepinv.physics.Decolorize` is associated with a simple
 # color-to-gray operator.
 
-physics = dinv.physics.Decolorize()
+physics = dinv.physics.Decolorize(device=device)
 
 y = physics(x)
 

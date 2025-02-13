@@ -3,15 +3,26 @@ import torch
 import torch.nn as nn
 import numpy as np
 from einops import rearrange
-from einops.layers.torch import Rearrange, Reduce
-from timm.models.layers import trunc_normal_, DropPath
-from .denoiser import online_weights_path
+from einops.layers.torch import Rearrange
+from .utils import get_weights_url
+from .base import Denoiser
+
+# Compatibility with optional dependency on timm
+try:
+    import timm
+    from timm.layers import trunc_normal_, DropPath
+except ImportError as e:
+    timm = e
 
 
 class WMSA(nn.Module):
     """Self-attention module in Swin Transformer"""
 
     def __init__(self, input_dim, output_dim, head_dim, window_size, type):
+        if isinstance(timm, ImportError):
+            raise ImportError(
+                "timm is needed to use the SCUNet class. Please install it with `pip install timm`"
+            ) from timm
         super(WMSA, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -170,9 +181,9 @@ class Block(nn.Module):
         if input_resolution <= window_size:
             self.type = "W"
 
-        print(
-            "Block Initial Type: {}, drop_path_rate:{:.6f}".format(self.type, drop_path)
-        )
+        # print(
+        #    "Block Initial Type: {}, drop_path_rate:{:.6f}".format(self.type, drop_path)
+        # )
         self.ln1 = nn.LayerNorm(input_dim)
         self.msa = WMSA(input_dim, input_dim, head_dim, window_size, self.type)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -260,7 +271,7 @@ class ConvTransBlock(nn.Module):
         return x
 
 
-class SCUNet(nn.Module):
+class SCUNet(Denoiser):
     r"""
     SCUNet denoising network.
 
@@ -276,9 +287,10 @@ class SCUNet(nn.Module):
         using Pytorch's default initialization. If ``pretrained='download'``, the weights will be downloaded from an
         online repository (only available for the default architecture).
         Finally, ``pretrained`` can also be set as a path to the user's own pretrained weights. Default: 'download'.
+        See :ref:`pretrained-weights <pretrained-weights>` for more details.
     :param bool train: training or testing mode. Default: False.
     :param str device: gpu or cpu. Default: 'cpu'.
-    ....
+
     """
 
     def __init__(
@@ -289,7 +301,6 @@ class SCUNet(nn.Module):
         drop_path_rate=0.0,
         input_resolution=256,
         pretrained="download",
-        train=False,
         device="cpu",
     ):
         super(SCUNet, self).__init__()
@@ -417,21 +428,15 @@ class SCUNet(nn.Module):
         if pretrained is not None:
             if pretrained == "download":
                 name = "scunet_color_real_psnr.pth"
-                url = online_weights_path() + name
-                ckpt_drunet = torch.hub.load_state_dict_from_url(
+                url = get_weights_url(model_name="scunet", file_name=name)
+                ckpt = torch.hub.load_state_dict_from_url(
                     url, map_location=lambda storage, loc: storage, file_name=name
                 )
             else:
-                ckpt_drunet = torch.load(
-                    pretrained, map_location=lambda storage, loc: storage
-                )
+                ckpt = torch.load(pretrained, map_location=lambda storage, loc: storage)
 
-            self.load_state_dict(ckpt_drunet, strict=True)
-
-        if not train:
+            self.load_state_dict(ckpt, strict=True)
             self.eval()
-            for _, v in self.named_parameters():
-                v.requires_grad = False
 
         if device is not None:
             self.to(device)
@@ -456,7 +461,9 @@ class SCUNet(nn.Module):
 
         return x
 
-    def forward(self, x, sigma):  # This is a blind model: sigma is not used
+    def forward(
+        self, x, sigma=None, **kwargs
+    ):  # This is a blind model: sigma is not used
         den = self.forward_scunet(x)
         return den
 
@@ -472,7 +479,7 @@ class SCUNet(nn.Module):
 
 # if __name__ == '__main__':
 #     # torch.cuda.empty_cache()
-#     net = SCUNet(pretrained='download', device='cpu', train=False)
+#     net = SCUNet(pretrained='download', device='cpu')
 #
 #     x = torch.randn((2, 3, 64, 128))
 #     x = net(x)

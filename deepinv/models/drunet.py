@@ -1,40 +1,41 @@
 # Code borrowed from Kai Zhang https://github.com/cszn/DPIR/tree/master/models
 
-import numpy as np
 import torch
-import torch.nn as nn
-
-from .denoiser import online_weights_path
+from .utils import get_weights_url, test_onesplit, test_pad
+from .base import Denoiser
 
 cuda = True if torch.cuda.is_available() else False
 Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 
 
-class DRUNet(nn.Module):
+class DRUNet(Denoiser):
     r"""
     DRUNet denoiser network.
 
     The network architecture is based on the paper
-    `Learning deep CNN denoiser prior for image restoration <https://arxiv.org/abs/1704.03264>`_,
+    `Plug-and-Play Image Restoration with Deep Denoiser Prior <https://arxiv.org/abs/2008.13751>`_,
     and has a U-Net like structure, with convolutional blocks in the encoder and decoder parts.
 
     The network takes into account the noise level of the input image, which is encoded as an additional input channel.
+
+    A pretrained network for (in_channels=out_channels=1 or in_channels=out_channels=3)
+    can be downloaded via setting ``pretrained='download'``.
 
     :param int in_channels: number of channels of the input.
     :param int out_channels: number of channels of the output.
     :param list nc: number of convolutional layers.
     :param int nb: number of convolutional blocks per layer.
     :param int nf: number of channels per convolutional layer.
-    :param str act_mode: activation mode, "R" for ReLU, "L" for LeakyReLU "E" for ELU and "S" for Softplus.
+    :param str act_mode: activation mode, "R" for ReLU, "L" for LeakyReLU "E" for ELU and "s" for Softplus.
     :param str downsample_mode: Downsampling mode, "avgpool" for average pooling, "maxpool" for max pooling, and
         "strideconv" for convolution with stride 2.
     :param str upsample_mode: Upsampling mode, "convtranspose" for convolution transpose, "pixelsuffle" for pixel
         shuffling, and "upconv" for nearest neighbour upsampling with additional convolution.
     :param str, None pretrained: use a pretrained network. If ``pretrained=None``, the weights will be initialized at random
         using Pytorch's default initialization. If ``pretrained='download'``, the weights will be downloaded from an
-        online repository (only available for the default architecture).
+        online repository (only available for the default architecture with 3 or 1 input/output channels).
         Finally, ``pretrained`` can also be set as a path to the user's own pretrained weights.
-    :param bool train: training or testing mode.
+        See :ref:`pretrained-weights <pretrained-weights>` for more details.
     :param str device: gpu or cpu.
 
     """
@@ -49,7 +50,6 @@ class DRUNet(nn.Module):
         downsample_mode="strideconv",
         upsample_mode="convtranspose",
         pretrained="download",
-        train=False,
         device=None,
     ):
         super(DRUNet, self).__init__()
@@ -73,21 +73,21 @@ class DRUNet(nn.Module):
                 ResBlock(nc[0], nc[0], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
             ],
-            downsample_block(nc[0], nc[1], bias=False, mode="2")
+            downsample_block(nc[0], nc[1], bias=False, mode="2"),
         )
         self.m_down2 = sequential(
             *[
                 ResBlock(nc[1], nc[1], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
             ],
-            downsample_block(nc[1], nc[2], bias=False, mode="2")
+            downsample_block(nc[1], nc[2], bias=False, mode="2"),
         )
         self.m_down3 = sequential(
             *[
                 ResBlock(nc[2], nc[2], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
             ],
-            downsample_block(nc[2], nc[3], bias=False, mode="2")
+            downsample_block(nc[2], nc[3], bias=False, mode="2"),
         )
 
         self.m_body = sequential(
@@ -114,32 +114,31 @@ class DRUNet(nn.Module):
             *[
                 ResBlock(nc[2], nc[2], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
-            ]
+            ],
         )
         self.m_up2 = sequential(
             upsample_block(nc[2], nc[1], bias=False, mode="2"),
             *[
                 ResBlock(nc[1], nc[1], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
-            ]
+            ],
         )
         self.m_up1 = sequential(
             upsample_block(nc[1], nc[0], bias=False, mode="2"),
             *[
                 ResBlock(nc[0], nc[0], bias=False, mode="C" + act_mode + "C")
                 for _ in range(nb)
-            ]
+            ],
         )
 
         self.m_tail = conv(nc[0], out_channels, bias=False, mode="C")
-
         if pretrained is not None:
             if pretrained == "download":
                 if in_channels == 4:
-                    name = "drunet_color.pth"
+                    name = "drunet_deepinv_color_finetune_22k.pth"
                 elif in_channels == 2:
-                    name = "drunet_gray.pth"
-                url = online_weights_path() + name
+                    name = "drunet_deepinv_gray_finetune_26k.pth"
+                url = get_weights_url(model_name="drunet", file_name=name)
                 ckpt_drunet = torch.hub.load_state_dict_from_url(
                     url, map_location=lambda storage, loc: storage, file_name=name
                 )
@@ -149,11 +148,9 @@ class DRUNet(nn.Module):
                 )
 
             self.load_state_dict(ckpt_drunet, strict=True)
-
-        if not train:
             self.eval()
-            for _, v in self.named_parameters():
-                v.requires_grad = False
+        else:
+            self.apply(weights_init_drunet)
 
         if device is not None:
             self.to(device)
@@ -175,22 +172,31 @@ class DRUNet(nn.Module):
         Run the denoiser on image with noise level :math:`\sigma`.
 
         :param torch.Tensor x: noisy image
-        :param float sigma: noise level (not used)
+        :param float, torch.Tensor sigma: noise level. If ``sigma`` is a float, it is used for all images in the batch.
+            If ``sigma`` is a tensor, it must be of shape ``(batch_size,)``.
         """
-        noise_level_map = (
-            torch.FloatTensor(x.size(0), 1, x.size(2), x.size(3))
-            .fill_(sigma)
-            .to(x.device)
-        )
+        if isinstance(sigma, torch.Tensor):
+            if sigma.ndim > 0:
+                noise_level_map = sigma.view(x.size(0), 1, 1, 1)
+                noise_level_map = noise_level_map.expand(-1, 1, x.size(2), x.size(3))
+            else:
+                noise_level_map = torch.ones(
+                    (x.size(0), 1, x.size(2), x.size(3)), device=x.device
+                ) * sigma[None, None, None, None].to(x.device)
+        else:
+            noise_level_map = (
+                torch.ones((x.size(0), 1, x.size(2), x.size(3)), device=x.device)
+                * sigma
+            )
         x = torch.cat((x, noise_level_map), 1)
         if (
-            x.size(2) // 8 == 0
-            and x.size(3) // 8 == 0
+            x.size(2) % 8 == 0
+            and x.size(3) % 8 == 0
             and x.size(2) > 31
             and x.size(3) > 31
         ):
             x = self.forward_unet(x)
-        elif x.size(2) < 32 or x.size(3) < 32:
+        elif self.training or (x.size(2) < 32 or x.size(3) < 32):
             x = test_pad(self.forward_unet, x, modulo=16)
         else:
             x = test_onesplit(self.forward_unet, x, refield=64)
@@ -604,55 +610,7 @@ def downsample_avgpool(
     return sequential(pool, pool_tail)
 
 
-"""
-Helpers for test time
-"""
-
-
-def test_onesplit(model, L, refield=32, sf=1):
-    """
-    Changes the size of the image to fit the model's expected image size.
-
-    :param model: model.
-    :param L: input Low-quality image.
-    :param refield: effective receptive field of the network, 32 is enough.
-    :param sf: scale factor for super-resolution, otherwise 1.
-    """
-    h, w = L.size()[-2:]
-    top = slice(0, (h // 2 // refield + 1) * refield)
-    bottom = slice(h - (h // 2 // refield + 1) * refield, h)
-    left = slice(0, (w // 2 // refield + 1) * refield)
-    right = slice(w - (w // 2 // refield + 1) * refield, w)
-    Ls = [
-        L[..., top, left],
-        L[..., top, right],
-        L[..., bottom, left],
-        L[..., bottom, right],
-    ]
-    Es = [model(Ls[i]) for i in range(4)]
-    b, c = Es[0].size()[:2]
-    E = torch.zeros(b, c, sf * h, sf * w).type_as(L)
-    E[..., : h // 2 * sf, : w // 2 * sf] = Es[0][..., : h // 2 * sf, : w // 2 * sf]
-    E[..., : h // 2 * sf, w // 2 * sf : w * sf] = Es[1][
-        ..., : h // 2 * sf, (-w + w // 2) * sf :
-    ]
-    E[..., h // 2 * sf : h * sf, : w // 2 * sf] = Es[2][
-        ..., (-h + h // 2) * sf :, : w // 2 * sf
-    ]
-    E[..., h // 2 * sf : h * sf, w // 2 * sf : w * sf] = Es[3][
-        ..., (-h + h // 2) * sf :, (-w + w // 2) * sf :
-    ]
-    return E
-
-
-def test_pad(model, L, modulo=16):
-    """
-    Pads the image to fit the model's expected image size.
-    """
-    h, w = L.size()[-2:]
-    padding_bottom = int(np.ceil(h / modulo) * modulo - h)
-    padding_right = int(np.ceil(w / modulo) * modulo - w)
-    L = torch.nn.ReplicationPad2d((0, padding_right, 0, padding_bottom))(L)
-    E = model(L)
-    E = E[..., :h, :w]
-    return E
+def weights_init_drunet(m):
+    classname = m.__class__.__name__
+    if classname.find("Conv") != -1:
+        nn.init.orthogonal_(m.weight.data, gain=0.2)

@@ -21,6 +21,7 @@ In this example, we unfold the Chambolle-Pock algorithm to solve this problem, a
 a wavelet denoiser in a LISTA fashion.
 
 """
+
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -30,7 +31,6 @@ from deepinv.utils.demo import load_dataset
 from deepinv.optim.data_fidelity import IndicatorL2
 from deepinv.optim.prior import PnP
 from deepinv.unfolded import unfolded_builder
-from deepinv.training_utils import train, test
 
 # %%
 # Setup paths for data loading and results.
@@ -38,10 +38,7 @@ from deepinv.training_utils import train, test
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
-RESULTS_DIR = BASE_DIR / "results"
-DEG_DIR = BASE_DIR / "degradations"
 CKPT_DIR = BASE_DIR / "ckpts"
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
@@ -68,12 +65,8 @@ train_transform = transforms.Compose(
     [transforms.RandomCrop(img_size), transforms.ToTensor()]
 )
 
-train_base_dataset = load_dataset(
-    train_dataset_name, ORIGINAL_DATA_DIR, transform=train_transform
-)
-test_base_dataset = load_dataset(
-    test_dataset_name, ORIGINAL_DATA_DIR, transform=test_transform
-)
+train_base_dataset = load_dataset(train_dataset_name, transform=train_transform)
+test_base_dataset = load_dataset(test_dataset_name, transform=test_transform)
 
 
 # %%
@@ -82,16 +75,16 @@ test_base_dataset = load_dataset(
 # We define an inpainting operator that randomly masks pixels with probability 0.5.
 #
 # A dataset of pairs of measurements and ground truth images is then generated using the
-# :meth:`dinv.datasets.generate_dataset` function.
+# :func:`deepinv.datasets.generate_dataset` function.
 #
-# Once the dataset is generated, we can load it using the :class:`dinv.datasets.HDF5Dataset` class.
+# Once the dataset is generated, we can load it using the :class:`deepinv.datasets.HDF5Dataset` class.
 
 n_channels = 3  # 3 for color images, 1 for gray-scale images
 probability_mask = 0.5  # probability to mask pixel
 
 # Generate inpainting operator
 physics = dinv.physics.Inpainting(
-    (n_channels, img_size, img_size), mask=probability_mask, device=device
+    tensor_size=(n_channels, img_size, img_size), mask=probability_mask, device=device
 )
 
 
@@ -137,14 +130,14 @@ test_dataloader = DataLoader(
 #          \begin{equation*}
 #          \begin{aligned}
 #          u_{k+1} &= \operatorname{prox}_{\sigma d^*}(u_k + \sigma A z_k) \\
-#          x_{k+1} &= \operatorname{D_{\theta}}(x_k-\tau A^\top u_{k+1}) \\
+#          x_{k+1} &= \operatorname{D_{\sigma}}(x_k-\tau A^\top u_{k+1}) \\
 #          z_{k+1} &= 2x_{k+1} -x_k \\
 #          \end{aligned}
 #          \end{equation*}
 #
 # where :math:`\operatorname{D_{\sigma}}` is a wavelet denoiser with thresholding parameters :math:`\sigma`.
 #
-# The learnable parameters of our network are :math:`\tau` and :math:`\theta`.
+# The learnable parameters of our network are :math:`\tau` and :math:`\sigma`.
 
 # Select the data fidelity term
 data_fidelity = IndicatorL2(radius=0.0)
@@ -156,28 +149,26 @@ data_fidelity = IndicatorL2(radius=0.0)
 max_iter = 30 if torch.cuda.is_available() else 20  # Number of unrolled iterations
 level = 3
 prior = [
-    PnP(denoiser=dinv.models.WaveletPrior(wv="db8", level=level, device=device))
+    PnP(denoiser=dinv.models.WaveletDenoiser(wv="db8", level=level, device=device))
     for i in range(max_iter)
 ]
 
 # Unrolled optimization algorithm parameters
-lamb = [
-    1.0
-] * max_iter  # initialization of the regularization parameter. A distinct lamb is trained for each iteration.
 stepsize = [
     1.0
 ] * max_iter  # initialization of the stepsizes. A distinct stepsize is trained for each iteration.
-sigma_denoiser = [0.01 * torch.ones(level, 3)] * max_iter
+sigma_denoiser = [
+    0.01 * torch.ones(level, 3)
+] * max_iter  # thresholding parameters \sigma
 
 stepsize_dual = 1.0  # dual stepsize for Chambolle-Pock
 
 # Define the parameters of the unfolded Primal-Dual Chambolle-Pock algorithm
 # The CP algorithm requires to specify `params_algo`` the linear operator and its adjoint on which splitting is performed.
-# See the documentation of the CP algorithm :meth:`deepinv.optim.optim_iterators.CPIteration` for more details.
+# See the documentation of the CP algorithm :class:`deepinv.optim.optim_iterators.CPIteration` for more details.
 params_algo = {
     "stepsize": stepsize,  # Stepsize for the primal update.
     "g_param": sigma_denoiser,  # prior parameter.
-    "lambda": lamb,  # Regularization parameter.
     "stepsize_dual": stepsize_dual,  # The CP algorithm requires a second stepsize ``sigma`` for the dual update.
     "K": physics.A,
     "K_adjoint": physics.A_adjoint,
@@ -209,10 +200,10 @@ model = unfolded_builder(
 # %%
 # Train the model
 # ---------------
-# We train the model using the :meth:`dinv.training_utils.train` function.
+# We train the model using the :class:`deepinv.Trainer` class.
 #
 # We perform supervised learning and use the mean squared error as loss function. This can be easily done using the
-# :class:`dinv.loss.SupLoss` class.
+# :class:`deepinv.loss.SupLoss` class.
 #
 # .. note::
 #
@@ -227,49 +218,40 @@ verbose = True  # print training information
 wandb_vis = False  # plot curves and images in Weight&Bias
 
 # choose training losses
-losses = dinv.loss.SupLoss(metric=dinv.metric.mse())
+losses = dinv.loss.SupLoss(metric=dinv.metric.MSE())
 
 # choose optimizer and scheduler
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-8)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8))
 
-train(
+trainer = dinv.Trainer(
     model=model,
-    train_dataloader=train_dataloader,
-    epochs=epochs,
     scheduler=scheduler,
     losses=losses,
-    physics=physics,
-    optimizer=optimizer,
     device=device,
+    optimizer=optimizer,
+    physics=physics,
+    train_dataloader=train_dataloader,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     wandb_vis=wandb_vis,
-    log_interval=1,
-    eval_interval=1,
-    ckp_interval=1,
+    epochs=epochs,
 )
+
+model = trainer.train()
 
 # %%
 # Test the network
 # --------------------------------------------
-# We can now test the trained network using the :meth:`dinv.training_utils.test` function.
+# We can now test the trained network using the :func:`deepinv.test` function.
 #
 # The testing function will compute test_psnr metrics and plot and save the results.
 
 plot_images = True
 method = "artifact_removal"
 
-test_psnr, test_std_psnr, init_psnr, init_std_psnr = test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation / test_dataset_name,
-    verbose=verbose,
-    wandb_vis=wandb_vis,  # training vialisations can be done in Weight&Bias
-)
+trainer.test(test_dataloader)
 
 # %%
 # Saving the model
@@ -296,25 +278,20 @@ model_spec = {
 # For fixed trained model prior across iterations, initialize with a single model.
 max_iter = 30 if torch.cuda.is_available() else 20  # Number of unrolled iterations
 prior_new = [
-    PnP(denoiser=dinv.models.WaveletPrior(wv="db8", level=level, device=device))
+    PnP(denoiser=dinv.models.WaveletDenoiser(wv="db8", level=level, device=device))
     for i in range(max_iter)
 ]
 
 # Unrolled optimization algorithm parameters
-lamb = [
-    1.0
-] * max_iter  # initialization of the regularization parameter. A distinct lamb is trained for each iteration.
 stepsize = [
     1.0
 ] * max_iter  # initialization of the stepsizes. A distinct stepsize is trained for each iteration.
 sigma_denoiser = [0.01 * torch.ones(level, 3)] * max_iter
-
 stepsize_dual = 1.0  # stepsize for Chambolle-Pock
 
 params_algo_new = {
     "stepsize": stepsize,
     "g_param": sigma_denoiser,
-    "lambda": lamb,
     "stepsize_dual": stepsize_dual,
     "K": physics.A,
     "K_adjoint": physics.A_adjoint,
@@ -334,13 +311,6 @@ model_new.load_state_dict(torch.load(CKPT_DIR / operation / "model.pth"))
 model_new.eval()
 
 # Test the model and check that the results are the same as before saving
-test_psnr, test_std_psnr, init_psnr, init_std_psnr = test(
-    model=model_new,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation / test_dataset_name,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
+dinv.training.test(
+    model_new, test_dataloader, physics=physics, device=device, show_progress_bar=False
 )

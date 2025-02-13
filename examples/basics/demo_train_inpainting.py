@@ -13,7 +13,6 @@ import torch
 from pathlib import Path
 from torchvision import transforms
 from deepinv.utils.demo import load_dataset
-from deepinv.training_utils import train, test
 
 # %%
 # Setup paths for data loading and results.
@@ -21,10 +20,7 @@ from deepinv.training_utils import train, test
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
-RESULTS_DIR = BASE_DIR / "results"
-DEG_DIR = BASE_DIR / "degradations"
 CKPT_DIR = BASE_DIR / "ckpts"
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
@@ -51,8 +47,8 @@ train_transform = transforms.Compose(
     [transforms.RandomCrop(img_size), transforms.ToTensor()]
 )
 
-train_dataset = load_dataset(train_dataset_name, ORIGINAL_DATA_DIR, train_transform)
-test_dataset = load_dataset(test_dataset_name, ORIGINAL_DATA_DIR, test_transform)
+train_dataset = load_dataset(train_dataset_name, train_transform)
+test_dataset = load_dataset(test_dataset_name, test_transform)
 
 # %%
 # Define forward operator and generate dataset
@@ -60,7 +56,7 @@ test_dataset = load_dataset(test_dataset_name, ORIGINAL_DATA_DIR, test_transform
 # We define an inpainting operator that randomly masks pixels with probability 0.5.
 #
 # A dataset of pairs of measurements and ground truth images is then generated using the
-# :meth:`deepinv.datasets.generate_dataset` function.
+# :func:`deepinv.datasets.generate_dataset` function.
 #
 # Once the dataset is generated, we can load it using the :class:`deepinv.datasets.HDF5Dataset` class.
 
@@ -69,7 +65,7 @@ probability_mask = 0.5  # probability to mask pixel
 
 # Generate inpainting operator
 physics = dinv.physics.Inpainting(
-    (n_channels, img_size, img_size), mask=probability_mask, device=device
+    tensor_size=(n_channels, img_size, img_size), mask=probability_mask, device=device
 )
 
 
@@ -130,7 +126,7 @@ model = dinv.models.ArtifactRemoval(backbone)
 # %%
 # Train the model
 # ----------------------------------------------------------------------------------------
-# We train the model using the :meth:`deepinv.training_utils.train` function.
+# We train the model using the :class:`deepinv.Trainer` class.
 #
 # We perform supervised learning and use the mean squared error as loss function. This can be easily done using the
 # :class:`deepinv.loss.SupLoss` class.
@@ -141,53 +137,41 @@ model = dinv.models.ArtifactRemoval(backbone)
 #       For a good reconstruction quality, we recommend to train for at least 100 epochs.
 #
 
-epochs = 4  # choose training epochs
-learning_rate = 5e-4
 
 verbose = True  # print training information
 wandb_vis = False  # plot curves and images in Weight&Bias
 
+epochs = 4  # choose training epochs
+learning_rate = 5e-4
+
 # choose training losses
-losses = dinv.loss.SupLoss(metric=dinv.metric.mse())
+losses = dinv.loss.SupLoss(metric=dinv.metric.MSE())
 
 # choose optimizer and scheduler
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-8)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8))
-
-train(
-    model=model,
-    train_dataloader=train_dataloader,
-    epochs=epochs,
-    scheduler=scheduler,
-    losses=losses,
-    physics=physics,
-    optimizer=optimizer,
+trainer = dinv.Trainer(
+    model,
     device=device,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
     wandb_vis=wandb_vis,
-    log_interval=2,
-    eval_interval=2,
-    ckp_interval=2,
+    physics=physics,
+    epochs=epochs,
+    scheduler=scheduler,
+    losses=losses,
+    optimizer=optimizer,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
+    train_dataloader=train_dataloader,
+    eval_dataloader=test_dataloader,
 )
+model = trainer.train()
 
 # %%
 # Test the network
 # --------------------------------------------
-# We can now test the trained network using the :meth:`deepinv.test` function.
+# We can now test the trained network using the :func:`deepinv.test` function.
 #
 # The testing function will compute test_psnr metrics and plot and save the results.
 
-plot_images = True
-method = "artifact_removal"
-
-test_psnr, test_std_psnr, init_psnr, init_std_psnr = test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation / test_dataset_name,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
-)
+trainer.test(test_dataloader)

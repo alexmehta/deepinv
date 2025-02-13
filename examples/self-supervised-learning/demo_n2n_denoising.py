@@ -20,13 +20,15 @@ and no gradient is propagated when computing :math:`R(y)`.
 
 """
 
-import deepinv as dinv
-from torch.utils.data import DataLoader
-import torch
 from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader
 from torchvision import transforms, datasets
-from deepinv.training_utils import train, test
-from deepinv.models.denoiser import online_weights_path
+
+import deepinv as dinv
+from deepinv.models.utils import get_weights_url
+from deepinv.utils.demo import get_data_home
 
 # %%
 # Setup paths for data loading and results.
@@ -34,11 +36,9 @@ from deepinv.models.denoiser import online_weights_path
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
-RESULTS_DIR = BASE_DIR / "results"
-DEG_DIR = BASE_DIR / "degradations"
 CKPT_DIR = BASE_DIR / "ckpts"
+ORIGINAL_DATA_DIR = get_data_home()
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
 torch.manual_seed(0)
@@ -57,10 +57,10 @@ train_dataset_name = "MNIST"
 transform = transforms.Compose([transforms.ToTensor()])
 
 train_dataset = datasets.MNIST(
-    root="../datasets/", train=True, transform=transform, download=True
+    root=ORIGINAL_DATA_DIR, train=True, transform=transform, download=True
 )
 test_dataset = datasets.MNIST(
-    root="../datasets/", train=False, transform=transform, download=True
+    root=ORIGINAL_DATA_DIR, train=False, transform=transform, download=True
 )
 
 # %%
@@ -135,9 +135,10 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8) + 1)
 
 # start with a pretrained model to reduce training time
-url = online_weights_path() + "ckp_50_demo_n2n.pth"
+file_name = "ckp_50_demo_n2n.pth"
+url = get_weights_url(model_name="demo", file_name=file_name)
 ckpt = torch.hub.load_state_dict_from_url(
-    url, map_location=lambda storage, loc: storage, file_name="ckp_50_demo_n2n.pth"
+    url, map_location=lambda storage, loc: storage, file_name=file_name
 )
 # load a checkpoint to reduce training time
 model.load_state_dict(ckpt["state_dict"])
@@ -159,20 +160,25 @@ test_dataloader = DataLoader(
     test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False
 )
 
-train(
+# Initialize the trainer
+trainer = dinv.Trainer(
     model=model,
-    train_dataloader=train_dataloader,
-    eval_dataloader=test_dataloader,
+    physics=physics,
     epochs=epochs,
     scheduler=scheduler,
     losses=loss,
-    physics=physics,
     optimizer=optimizer,
     device=device,
+    train_dataloader=train_dataloader,
+    eval_dataloader=test_dataloader,
+    plot_images=True,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     wandb_vis=wandb_vis,
 )
+
+model = trainer.train()
 
 # %%
 # Test the network
@@ -180,16 +186,4 @@ train(
 #
 #
 
-plot_images = True
-method = "neighbor2neighbor"
-
-test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
-)
+trainer.test(test_dataloader)

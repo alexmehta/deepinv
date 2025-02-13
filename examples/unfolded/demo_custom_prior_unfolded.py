@@ -6,6 +6,7 @@ This example shows how to implement a learned unrolled proximal gradient descent
 The algorithm is trained on a dataset of compressed sensing measurements of MNIST images.
 
 """
+
 from pathlib import Path
 import torch
 from torchvision import datasets
@@ -15,7 +16,7 @@ from torch.utils.data import DataLoader
 from deepinv.optim.data_fidelity import L2
 from deepinv.optim.prior import Prior
 from deepinv.unfolded import unfolded_builder
-from deepinv.training_utils import train, test
+from deepinv.utils.demo import get_data_home
 
 # %%
 # Setup paths for data loading and results.
@@ -23,10 +24,10 @@ from deepinv.training_utils import train, test
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
 RESULTS_DIR = BASE_DIR / "results"
 CKPT_DIR = BASE_DIR / "ckpts"
+ORIGINAL_DATA_DIR = get_data_home()
 
 # Set the global random seed from pytorch to ensure reproducibility of the example.
 torch.manual_seed(0)
@@ -98,13 +99,13 @@ test_dataset = dinv.datasets.HDF5Dataset(path=generated_datasets_path, train=Fal
 #
 # .. math::
 #
-#          \min_x \frac{\lambda}{2} \|y - Ax\|_2^2 + \operatorname{TV}_{\text{smooth}}(x)
+#          \min_x \frac{1}{2} \|y - Ax\|_2^2 + \lambda\operatorname{TV}_{\text{smooth}}(x)
 #
 # where :math:`\operatorname{TV}_{\text{smooth}}` is a smooth approximation of TV.
 # The proximal gradient iteration (see also :class:`deepinv.optim.optim_iterators.PGDIteration`) is defined as
 #
 #   .. math::
-#           x_{k+1} = \text{prox}_{\gamma \operatorname{TV}_{\text{smooth}}}(x_k - \gamma \lambda A^T (Ax_k - y))
+#           x_{k+1} = \text{prox}_{\gamma \lambda \operatorname{TV}_{\text{smooth}}}(x_k - \gamma A^T (Ax_k - y))
 #
 # where :math:`\gamma` is the stepsize and :math:`\text{prox}_{g}` is the proximity operator of :math:`g(x) =\operatorname{TV}_{\text{smooth}}(x)`.
 #
@@ -126,7 +127,7 @@ def nabla(I):
 
 
 # Define the smooth TV prior as the mse of the image finite difference.
-def g(x, *args):
+def g(x, *args, **kwargs):
     dx = nabla(x)
     tv_smooth = torch.nn.functional.mse_loss(
         dx, torch.zeros_like(dx), reduction="sum"
@@ -137,7 +138,8 @@ def g(x, *args):
 # Define the prior. A prior instance from :class:`deepinv.priors` can be simply defined with an explicit potential :math:`g` function as such:
 prior = Prior(g=g)
 
-# We use :meth:`deepinv.unfolded.unfolded_builder` to define the unfolded algorithm
+# %%
+# We use :func:`deepinv.unfolded.unfolded_builder` to define the unfolded algorithm
 # and set both the stepsizes of the PGD algorithm :math:`\gamma` (``stepsize``) and the soft
 # thresholding parameters :math:`\lambda` as learnable parameters.
 # These parameters are initialized with a table of length max_iter,
@@ -145,7 +147,7 @@ prior = Prior(g=g)
 # For single ``stepsize`` and ``g_param`` shared across iterations, initialize with a single float value.
 
 # Unrolled optimization algorithm parameters
-max_iter = 5
+max_iter = 5  # Number of unrolled iterations
 lamb = [
     1.0
 ] * max_iter  # initialization of the regularization parameter. A distinct lamb is trained for each iteration.
@@ -176,7 +178,7 @@ model = unfolded_builder(
     data_fidelity=data_fidelity,
     max_iter=max_iter,
     prior=prior,
-    g_first=False,
+    g_first=True,
 )
 
 # %%
@@ -187,14 +189,14 @@ model = unfolded_builder(
 
 
 # Training parameters
-epochs = 10 if torch.cuda.is_available() else 5
-learning_rate = 1e-2
+epochs = 20 if torch.cuda.is_available() else 10
+learning_rate = 5e-3  # reduce this parameter when using more epochs
 
 # Choose optimizer and scheduler
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.0)
 
 # Choose supervised training loss
-losses = [dinv.loss.SupLoss(metric=dinv.metric.mse())]
+losses = [dinv.loss.SupLoss(metric=torch.nn.L1Loss())]
 
 # Batch sizes and data loaders
 train_batch_size = 64 if torch.cuda.is_available() else 8
@@ -213,19 +215,23 @@ test_dataloader = DataLoader(
 # We train the network using the library's train function.
 #
 
-train(
-    model=model,
+trainer = dinv.Trainer(
+    model,
+    physics=physics,
     train_dataloader=train_dataloader,
     eval_dataloader=test_dataloader,
     epochs=epochs,
-    losses=losses,
-    physics=physics,
-    optimizer=optimizer,
     device=device,
+    losses=losses,
+    optimizer=optimizer,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     wandb_vis=wandb_vis,  # training visualization can be done in Weight&Bias
 )
+
+
+model = trainer.train()
 
 # %%
 # Test the network.
@@ -236,18 +242,23 @@ train(
 # and `GT` shows the ground truth.
 #
 
-plot_images = True
-method = "unfolded_pgd"
+trainer.test(test_dataloader)
 
-test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=RESULTS_DIR / method / operation,
-    verbose=verbose,
-    wandb_vis=wandb_vis,
+test_sample, _ = next(iter(test_dataloader))
+model.eval()
+test_sample = test_sample.to(device)
+
+# Get the measurements and the ground truth
+y = physics(test_sample)
+with torch.no_grad():
+    rec = model(y, physics=physics)
+
+backprojected = physics.A_adjoint(y)
+
+dinv.utils.plot(
+    [backprojected, rec, test_sample],
+    titles=["Linear", "Reconstruction", "Ground truth"],
+    suptitle="Reconstruction results",
 )
 
 
@@ -256,9 +267,9 @@ test(
 # ------------------------------------
 #
 # We now plot the weights of the network that were learned and check that they are different from their initialization
-# values. Note that ``g_param`` corresponds to :math:`1/\lambda` in the proximal gradient algorithm.
+# values. Note that ``g_param`` corresponds to :math:`\lambda` in the proximal gradient algorithm.
 #
 
 dinv.utils.plotting.plot_parameters(
-    model, init_params=params_algo, save_dir=RESULTS_DIR / method / operation
+    model, init_params=params_algo, save_dir=RESULTS_DIR / "unfolded_pgd" / operation
 )

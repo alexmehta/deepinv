@@ -1,6 +1,6 @@
 r"""
 Saving and loading models
-====================================================================================================
+=========================
 
 Models can be saved and loaded in the same way as in PyTorch. In this example, we show how to define, load and save a
 model. For the purpose of the example, we choose an unfolded Chambolle Pock algorithm as the model.
@@ -8,6 +8,8 @@ The architecture of the model and its training are described
 in the `constrained unfolded demo <https://deepinv.github.io/deepinv/auto_examples/unfolded/demo_unfolded_constrained_LISTA.html>`_.
 
 """
+
+import importlib.util
 from pathlib import Path
 import torch
 
@@ -15,16 +17,15 @@ import deepinv as dinv
 from deepinv.optim.data_fidelity import IndicatorL2
 from deepinv.optim.prior import PnP
 from deepinv.unfolded import unfolded_builder
-from deepinv.models.denoiser import online_weights_path
+from deepinv.models.utils import get_weights_url
 
 
 # %%
-# Setup paths for data loading and results.
-# ---------------------------------------------------------------
+# Setup paths for data loading and results
+# ----------------------------------------
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
 RESULTS_DIR = BASE_DIR / "results"
 DEG_DIR = BASE_DIR / "degradations"
@@ -33,7 +34,7 @@ CKPT_DIR = BASE_DIR / "ckpts"
 
 # %%
 # Define a forward operator
-# --------------------------------------------
+# -------------------------
 # We define a simple inpainting operator with 50% of missing pixels.
 #
 
@@ -49,7 +50,7 @@ physics = dinv.physics.Inpainting(
 
 # %%
 # Define a model
-# --------------------------------------------
+# --------------
 # For the purpose of this example, we define a rather complex model that consists an unfolded Chambolle-Pock algorithm.
 #
 
@@ -63,10 +64,10 @@ data_fidelity = IndicatorL2(radius=0.0)
 # For fixed trained model prior across iterations, initialize with a single model.
 
 level = 3
-max_iter = 30 if torch.cuda.is_available() else 20  # Number of unrolled iterations
+max_iter = 20  # Number of unrolled iterations
 
 prior = [
-    PnP(denoiser=dinv.models.WaveletPrior(wv="db8", level=level, device=device))
+    PnP(denoiser=dinv.models.WaveletDenoiser(wv="db8", level=level, device=device))
     for i in range(max_iter)
 ]
 
@@ -115,16 +116,18 @@ model = unfolded_builder(
     custom_init=custom_init_CP,
 )
 
-# %% Saving the model
-# -------------------
+# %%
+# Saving the model
+# ----------------
 # We can save the trained model following the standard PyTorch procedure.
 
 # Save the model
 
 torch.save(model.state_dict(), CKPT_DIR / "inpainting/model_nontrained.pth")
 
-# %% Loading the model
-# -------------------
+# %%
+# Loading the model
+# -----------------
 # Similarly, we can load our trained unfolded architecture following the standard PyTorch procedure.
 # This network was trained in the demo :ref:`sphx_glr_auto_examples_unfolded_demo_unfolded_constrained_LISTA.py`.
 
@@ -134,7 +137,7 @@ torch.save(model.state_dict(), CKPT_DIR / "inpainting/model_nontrained.pth")
 # For fixed trained model prior across iterations, initialize with a single model.
 
 prior_new = [
-    PnP(denoiser=dinv.models.WaveletPrior(wv="db8", level=level, device=device))
+    PnP(denoiser=dinv.models.WaveletDenoiser(wv="db8", level=level, device=device))
     for i in range(max_iter)
 ]
 
@@ -175,10 +178,16 @@ print(
 
 
 # load a state_dict checkpoint
-url = online_weights_path() + "demo_unfolded_CP_2.pth"
-ckpt_state_dict = torch.hub.load_state_dict_from_url(
-    url, map_location=lambda storage, loc: storage, file_name="demo_unfolded_CP_2.pth"
+file_name = (
+    "demo_unfolded_CP_ptwt.pth"
+    if importlib.util.find_spec("ptwt")
+    else "demo_unfolded_CP.pth"
 )
+url = get_weights_url(model_name="demo", file_name=file_name)
+ckpt_state_dict = torch.hub.load_state_dict_from_url(
+    url, map_location=lambda storage, loc: storage, file_name=file_name
+)
+
 # load a state_dict checkpoint
 model_new.load_state_dict(ckpt_state_dict)
 

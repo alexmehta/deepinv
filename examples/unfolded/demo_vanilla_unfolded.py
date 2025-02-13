@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from deepinv.optim.data_fidelity import L2
 from deepinv.optim.prior import PnP
 from deepinv.unfolded import unfolded_builder
-from deepinv.training_utils import train, test
 from torchvision import transforms
 from deepinv.utils.demo import load_dataset
 
@@ -25,7 +24,6 @@ from deepinv.utils.demo import load_dataset
 #
 
 BASE_DIR = Path(".")
-ORIGINAL_DATA_DIR = BASE_DIR / "datasets"
 DATA_DIR = BASE_DIR / "measurements"
 RESULTS_DIR = BASE_DIR / "results"
 CKPT_DIR = BASE_DIR / "ckpts"
@@ -61,12 +59,8 @@ train_transform = transforms.Compose(
     [transforms.RandomCrop(img_size), transforms.ToTensor()]
 )
 # Define the base train and test datasets of clean images.
-train_base_dataset = load_dataset(
-    train_dataset_name, ORIGINAL_DATA_DIR, transform=train_transform
-)
-test_base_dataset = load_dataset(
-    test_dataset_name, ORIGINAL_DATA_DIR, transform=test_transform
-)
+train_base_dataset = load_dataset(train_dataset_name, transform=train_transform)
+test_base_dataset = load_dataset(test_dataset_name, transform=test_transform)
 
 # Use parallel dataloader if using a GPU to fasten training, otherwise, as all computes are on CPU, use synchronous
 # dataloading.
@@ -78,9 +72,9 @@ noise_level_img = 0.03
 
 # Generate the gaussian blur downsampling operator.
 physics = dinv.physics.Downsampling(
+    filter="gaussian",
     img_size=(n_channels, img_size, img_size),
     factor=factor,
-    mode="gauss",
     device=device,
     noise_model=dinv.physics.GaussianNoise(sigma=noise_level_img),
 )
@@ -106,7 +100,7 @@ test_dataset = dinv.datasets.HDF5Dataset(path=generated_datasets_path, train=Fal
 # %%
 # Define the unfolded PnP algorithm.
 # ----------------------------------------------------------------------------------------
-# We use the helper function :meth:`deepinv.unfolded.unfolded_builder` to defined the Unfolded architecture.
+# We use the helper function :func:`deepinv.unfolded.unfolded_builder` to defined the Unfolded architecture.
 # The chosen algorithm is here DRS (Douglas-Rachford Splitting).
 # Note that if the prior (resp. a parameter) is initialized with a list of lenght max_iter,
 # then a distinct model (resp. parameter) is trained for each iteration.
@@ -120,23 +114,18 @@ data_fidelity = L2()
 
 # Set up the trainable denoising prior
 # Here the prior model is common for all iterations
-prior = PnP(denoiser=dinv.models.DnCNN(depth=7, pretrained=None, train=True).to(device))
+prior = PnP(denoiser=dinv.models.DnCNN(depth=7, pretrained=None).to(device))
 
 # The parameters are initialized with a list of length max_iter, so that a distinct parameter is trained for each iteration.
-lamb = [
-    1.0
-] * max_iter  # regularization parameter (multiplier of the data fidelity term)
-stepsize = [1.0] * max_iter  # stepsize of the algorithm
+stepsize = [1] * max_iter  # stepsize of the algorithm
 sigma_denoiser = [0.01] * max_iter  # noise level parameter of the denoiser
-beta = 1.0  # relaxation parameter of the Douglas-Rachford splitting
+beta = 1  # relaxation parameter of the Douglas-Rachford splitting
 params_algo = {  # wrap all the restoration parameters in a 'params_algo' dictionary
     "stepsize": stepsize,
-    "lambda": lamb,
     "g_param": sigma_denoiser,
     "beta": beta,
 }
 trainable_params = [
-    "lambda",
     "g_param",
     "stepsize",
     "beta",
@@ -173,7 +162,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs * 0.8))
 
 # choose supervised training loss
-losses = [dinv.loss.SupLoss(metric=dinv.metric.mse())]
+losses = [dinv.loss.SupLoss(metric=dinv.metric.MSE())]
 
 train_dataloader = DataLoader(
     train_dataset, batch_size=train_batch_size, num_workers=num_workers, shuffle=True
@@ -185,51 +174,60 @@ test_dataloader = DataLoader(
 # %%
 # Train the network
 # ----------------------------------------------------------------------------------------
-# We train the network using the library's train function.
+# We train the network using the :class:`deepinv.Trainer` class.
 
-train(
-    model=model,
+trainer = dinv.Trainer(
+    model,
+    physics=physics,
     train_dataloader=train_dataloader,
     eval_dataloader=test_dataloader,
     epochs=epochs,
     scheduler=scheduler,
     losses=losses,
-    physics=physics,
     optimizer=optimizer,
     device=device,
     save_path=str(CKPT_DIR / operation),
     verbose=verbose,
+    show_progress_bar=False,  # disable progress bar for better vis in sphinx gallery.
     wandb_vis=wandb_vis,  # training visualization can be done in Weight&Bias
 )
+
+model = trainer.train()
+
 
 # %%
 # Test the network
 # --------------------------------------------
 #
 #
+trainer.test(test_dataloader)
 
-method = "unfolded_drs"
-save_folder = RESULTS_DIR / method / operation
-wandb_vis = False  # plot curves and images in Weight&Bias.
-plot_images = True  # plot images. Images are saved in save_folder.
-plot_metrics = True  # compute performance and convergence metrics along the algorithm, curved saved in RESULTS_DIR
+test_sample, _ = next(iter(test_dataloader))
+model.eval()
+test_sample = test_sample.to(device)
 
-test(
-    model=model,
-    test_dataloader=test_dataloader,
-    physics=physics,
-    device=device,
-    plot_images=plot_images,
-    save_folder=save_folder,
-    verbose=verbose,
-    plot_metrics=plot_metrics,
-    wandb_vis=wandb_vis,  # test visualization can be done in Weight&Bias
+# Get the measurements and the ground truth
+y = physics(test_sample)
+with torch.no_grad():
+    rec = model(y, physics=physics)
+
+backprojected = physics.A_adjoint(y)
+
+dinv.utils.plot(
+    [backprojected, rec, test_sample],
+    titles=["Linear", "Reconstruction", "Ground truth"],
+    suptitle="Reconstruction results",
 )
 
+
 # %%
-# Plotting the trained parameters.
+# Plotting the weights of the network.
 # ------------------------------------
+#
+# We now plot the weights of the network that were learned and check that they are different from their initialization
+# values. Note that ``g_param`` corresponds to :math:`\lambda` in the proximal gradient algorithm.
+#
 
 dinv.utils.plotting.plot_parameters(
-    model, init_params=params_algo, save_dir=RESULTS_DIR / method / operation
+    model, init_params=params_algo, save_dir=RESULTS_DIR / "unfolded_pgd" / operation
 )
