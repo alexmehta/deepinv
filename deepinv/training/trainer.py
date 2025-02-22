@@ -589,6 +589,7 @@ class Trainer:
                     ):
                         if self.metric_best is None:
                             self.metric_best = metric
+                            self.epoch_best = epoch
                         else:
                             self.metric_best = self.save_fn(self.metric_best, metric)
                             if self.metric_best == metric:
