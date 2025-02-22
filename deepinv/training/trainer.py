@@ -148,7 +148,7 @@ class Trainer:
     check_grad: bool = False
     wandb_vis: bool = False
     wandb_setup: dict = field(default_factory=dict)
-    ckp_interval: Union[int] = 1
+    ckp_interval: int = 1
     save_best_model: bool = False
     eval_interval: int = 1
     plot_interval: int = 1
