@@ -1,3 +1,4 @@
+import random
 import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -22,10 +23,152 @@ def model():
 
 
 @pytest.fixture
+def one_param_model():
+    class OneParamModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = torch.nn.Parameter(torch.Tensor([1]))
+
+        def forward(self, x, *args, **kwargs):
+            return x * self.param
+
+    return OneParamModel()
+
+
+@pytest.fixture
 def physics(imsize, device):
     # choose a forward operator
     filter = torch.ones((1, 1, 3, 3), device=device) / 9
     return dinv.physics.BlurFFT(img_size=imsize, filter=filter, device=device)
+
+
+@pytest.fixture
+def int_dataloaders(tmp_path, device):
+    class DummyPhysics(Physics):
+        def A(self, x):
+            return x
+
+        def A_adj(self, x):
+            return x
+
+        def A_dagger(self, x):
+            return x
+
+    class DummyDataset(Dataset):
+        def __len__(self):
+            return 20
+
+        def __getitem__(self, i):
+            return torch.Tensor([i])
+
+    dataset_path = dinv.datasets.generate_dataset(
+        train_dataset=DummyDataset(),
+        test_dataset=DummyDataset(),
+        physics=DummyPhysics(),
+        save_dir=tmp_path / "dataset",
+        device=device,
+    )
+    dataloader = DataLoader(
+        dinv.datasets.HDF5Dataset(
+            dataset_path,
+            train=True,
+            load_physics_generator_params=False,
+        )
+    )
+    test_dataloader = DataLoader(
+        dinv.datasets.HDF5Dataset(
+            dataset_path,
+            train=False,
+            load_physics_generator_params=False,
+        )
+    )
+    return dataloader, test_dataloader
+
+
+def test_best_and_epoch_selection(tmp_path, one_param_model, device, int_dataloaders):
+    class DummyPhysics(Physics):
+        def A(self, x):
+            return x
+
+        def A_adj(self, x):
+            return x
+
+        def A_dagger(self, x):
+            return x
+
+    one_param_model = one_param_model.to(device)
+    dataloader, test_dataloader = int_dataloaders
+    trainer = dinv.Trainer(
+        model=one_param_model,
+        train_dataloader=dataloader,
+        eval_dataloader=test_dataloader,
+        optimizer=torch.optim.Adam(one_param_model.parameters(), lr=0.1),
+        losses=[dinv.loss.MCLoss()],
+        physics=DummyPhysics(),
+        epochs=20,
+        device=device,
+        save_path=tmp_path / "models",
+        save_fn=min,
+        metrics=[dinv.loss.MSE()],
+        save_metric=dinv.loss.MSE(),
+        save_best_model=True,
+        ckp_interval=1,
+        verbose=False,
+        show_progress_bar=False,
+    )
+    trainer.train()
+    tmp_path = tmp_path / "models"
+    best_model = torch.load(str(next(iter(tmp_path.glob("*/"))) / "ckp_best.pth.tar"))[
+        "state_dict"
+    ]
+    best_model = trainer.model.load_state_dict(best_model)
+    trainer.model.eval()
+    for i in range(20):
+        assert trainer.model(i) == i
+    file_count = len(list(tmp_path.glob("*/*")))
+    assert trainer.epochs + 1 == file_count
+
+
+def test_best_model_selection(tmp_path, one_param_model, device, int_dataloaders):
+    class DummyPhysics(Physics):
+        def A(self, x):
+            return x
+
+        def A_adj(self, x):
+            return x
+
+        def A_dagger(self, x):
+            return x
+
+    one_param_model = one_param_model.to(device)
+    dataloader, test_dataloader = int_dataloaders
+    trainer = dinv.Trainer(
+        model=one_param_model,
+        train_dataloader=dataloader,
+        eval_dataloader=test_dataloader,
+        optimizer=torch.optim.Adam(one_param_model.parameters(), lr=0.1),
+        losses=[dinv.loss.MCLoss()],
+        physics=DummyPhysics(),
+        epochs=20,
+        metrics=[dinv.loss.MSE()],
+        device=device,
+        save_path=tmp_path / "models",
+        save_fn=min,
+        save_metric=dinv.loss.MSE(),
+        save_best_model=True,
+        ckp_interval=1,
+        verbose=False,
+        show_progress_bar=False,
+    )
+    trainer.train()
+    tmp_path = tmp_path / "models"
+    best_model = torch.load(str(next(iter(tmp_path.glob("*/"))) / "ckp_best.pth.tar"))[
+        "state_dict"
+    ]
+    best_model = trainer.model.load_state_dict(best_model)
+    trainer.model.eval()
+    for i in range(20):
+        assert trainer.model(i) == i
 
 
 @pytest.mark.parametrize("no_learning", NO_LEARNING)
@@ -40,6 +183,7 @@ def test_nolearning(imsize, physics, model, no_learning, device):
         compare_no_learning=True,
         no_learning_method=no_learning,
     )
+
     x_hat = trainer.no_learning_inference(y, physics)
     assert (physics.A(x_hat) - y).pow(2).mean() < 0.1
 

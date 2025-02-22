@@ -5,6 +5,7 @@ from tqdm import tqdm
 from deepinv.models import Reconstructor
 
 import deepinv.physics
+from deepinv.utils.seed import seed_all
 from deepinv.sampling.langevin import MonteCarlo
 from deepinv.utils.plotting import plot
 
@@ -135,8 +136,7 @@ class DDRM(Reconstructor):
         # assert physics.__class__ == deepinv.physics.DecomposablePhysics, 'The forward operator requires a singular value decomposition'
         with torch.no_grad():
             if seed:
-                np.random.seed(seed)
-                torch.manual_seed(seed)
+                seed_all(seed)
 
             if hasattr(physics.noise_model, "sigma"):
                 sigma_noise = physics.noise_model.sigma
@@ -416,7 +416,7 @@ class DiffPIR(Reconstructor):
         """
 
         if seed:
-            torch.manual_seed(seed)
+            seed_all(seed)
 
         if hasattr(physics.noise_model, "sigma"):
             sigma = physics.noise_model.sigma  # Then we overwrite the default values
@@ -587,8 +587,7 @@ class DPS(Reconstructor):
 
     def forward(self, y, physics: deepinv.physics.Physics, seed=None, x_init=None):
         if seed:
-            torch.manual_seed(seed)
-
+            seed_all(seed)
         skip = self.num_train_timesteps // self.max_iter
         batch_size = y.shape[0]
 
@@ -658,15 +657,15 @@ class DPS(Reconstructor):
 #     from deepinv.models.denoiser import Denoiser
 #     import torchvision
 #     from deepinv.loss.metric import PSNR
-#
+
 #     device = dinv.utils.get_freer_gpu() if torch.cuda.is_available() else "cpu"
-#
+
 #     x = torchvision.io.read_image("../../datasets/celeba/img_align_celeba/085307.jpg")
 #     x = x.unsqueeze(0).float().to(device) / 255
-#
+
 #     sigma_noise = 0.01
 #     # physics = dinv.physics.Denoising()
-#
+
 #     # physics = dinv.physics.BlurFFT(img_size=x.shape[1:], filter=dinv.physics.blur.gaussian_blur(sigma=1.),
 #     #                               device=device)
 #     physics = dinv.physics.Decolorize()
@@ -674,16 +673,16 @@ class DPS(Reconstructor):
 #     #   mask=0.5, tensor_size=(3, 218, 178), device=dinv.device
 #     # )
 #     # physics.mask *= (torch.rand_like(physics.mask))
-#     physics.noise_model = dinv.physics.GaussianNoise(sigma_noise)
-#
+#     # physics.noise_model = dinv.physics.GaussianNoise(sigma_noise)
+
 #     y = physics(x)
 #     model_spec = {
 #         "name": "drunet",
 #         "args": {"device": device, "pretrained": "download"},
 #     }
-#
+
 #     denoiser = Denoiser(model_spec=model_spec)
-#
+
 #     f = DDRM(
 #         denoiser=denoiser,
 #         etab=1.0,
@@ -691,18 +690,18 @@ class DPS(Reconstructor):
 #         sigmas=np.linspace(1, 0, 100),
 #         verbose=True,
 #     )
-#
+
 #     xhat = f(y, physics)
 #     dinv.utils.plot(
 #         [physics.A_adjoint(y), x, xhat], titles=["meas.", "ground-truth", "xhat"]
 #     )
-#
+
 #     print(f"PSNR 1 sample: {PSNR()(x, xhat):.2f} dB")
 #     # print(f'mean PSNR sample: {PSNR()(x, denoiser(y, sigma_noise)):.2f} dB')
-#
+
 #     # sampler = dinv.sampling.DiffusionSampler(f, max_iter=10, save_chain=True, verbose=True)
 #     # xmean, xvar = sampler(y, physics)
-#
+
 #     # chain = sampler.get_chain()
 #     # distance = np.zeros((len(chain)))
 #     # for k, xhat in enumerate(chain):
@@ -712,18 +711,18 @@ class DPS(Reconstructor):
 #     # thres = distance[int(len(distance) * .95)]  #
 #     # err = (x - xmean).pow(2).mean()
 #     # print(f'Confidence region: {thres:.2e}, error: {err:.2e}')
-#
+
 #     # xstdn = xvar.sqrt()
 #     # xstdn_plot = xstdn.sum(dim=1).unsqueeze(1)
-#
+
 #     # error = (xmean - x).abs()  # per pixel average abs. error
 #     # error_plot = error.sum(dim=1).unsqueeze(1)
-#
+
 #     # print(f'Correct std: {(xstdn>error).sum()/np.prod(xstdn.shape)*100:.1f}%')
 #     # error = (xmean - x)
 #     # dinv.utils.plot_debug(
 #     #    [physics.A_adjoint(y), x, xmean, xstdn_plot, error_plot], titles=["meas.", "ground-truth", "mean", "std", "error"]
 #     # )
-#
+
 #     # print(f'PSNR 1 sample: {PSNR()(x, chain[0]):.2f} dB')
 #     # print(f'mean PSNR sample: {PSNR()(x, xmean):.2f} dB')

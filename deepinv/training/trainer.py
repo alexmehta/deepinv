@@ -6,7 +6,7 @@ from tqdm import tqdm
 import torch
 import wandb
 from pathlib import Path
-from typing import Union, List
+from typing import Union, List, Literal, Callable
 from dataclasses import dataclass, field
 from deepinv.loss import Loss, SupLoss, BaseLossScheduler
 from deepinv.loss.metric import PSNR, Metric
@@ -88,6 +88,8 @@ class Trainer:
     :param bool loop_physics_generator: if True, resets the physics generator back to its initial state at the beginning of each epoch,
         so that the same measurements are generated each epoch. Requires `shuffle=False` in dataloaders. If False, generates new physics every epoch.
         Used in conjunction with ``physics_generator``.
+    :param save_metric: Metric used for saving the best model. Default is PSNR. Only used if ``eval_dataloader`` is not None and ``save_best_interval = True``.
+    :param save_fn: Function used to determine the best model. Default is max (thus will select the epoch with the maximum value for the metric). Only used if ``eval_dataloader`` is not None and ``save_best_interval = True``.
     :param Metric, list[Metric] metrics: Metric or list of metrics used for evaluating the model.
         They should have ``reduction=None`` as we perform the averaging using :class:`deepinv.utils.AverageMeter` to deal with uneven batch sizes.
         :ref:`See the libraries' evaluation metrics <metric>`.
@@ -102,7 +104,7 @@ class Trainer:
     :param bool check_grad: Compute and print the gradient norm at each iteration.
     :param bool wandb_vis: Logs data onto Weights & Biases, see https://wandb.ai/ for more details.
     :param dict wandb_setup: Dictionary with the setup for wandb, see https://docs.wandb.ai/quickstart for more details.
-    :param int ckp_interval: The model is saved every ``ckp_interval`` epochs.
+    :param int, 'best' ckp_interval: The model is saved every ``ckp_interval`` epochs.
     :param int eval_interval: Number of epochs (or train iters, if ``log_train_batch=True``) between each evaluation of the model on the evaluation set.
     :param int plot_interval: Frequency of plotting images to wandb during train evaluation (at the end of each epoch).
         If ``1``, plots at each epoch.
@@ -135,6 +137,8 @@ class Trainer:
     physics_generator: Union[PhysicsGenerator, List[PhysicsGenerator]] = None
     loop_physics_generator: bool = False
     metrics: Union[Metric, List[Metric]] = PSNR()
+    save_metric: Metric = PSNR()
+    save_fn: Callable = max
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_pretrained: Union[str, None] = None
     save_path: Union[str, Path] = "."
@@ -144,7 +148,8 @@ class Trainer:
     check_grad: bool = False
     wandb_vis: bool = False
     wandb_setup: dict = field(default_factory=dict)
-    ckp_interval: int = 1
+    ckp_interval: Union[int] = 1
+    save_best_model: bool = False
     eval_interval: int = 1
     plot_interval: int = 1
     freq_plot: int = None
@@ -157,6 +162,7 @@ class Trainer:
     verbose: bool = True
     verbose_individual_losses: bool = True
     show_progress_bar: bool = True
+    epoch_best: int = 0
 
     def setup_train(self, train=True, **kwargs):
         r"""
@@ -279,6 +285,13 @@ class Trainer:
         if train:
             self.loss_history = []
         self.save_folder_im = None
+        if self.save_best_model:
+            if self.eval_dataloader is None:
+                raise ValueError(
+                    "No evaluation dataloader provided, cannot save best model."
+                )
+            else:
+                self.metric_best = None
 
         self.load_model()
 
@@ -569,6 +582,17 @@ class Trainer:
                     logs[f"{l.__class__.__name__} no learning"] = (
                         self.logs_metrics_linear[k].avg
                     )
+                    # save best model performance for the metric
+                    if (
+                        self.save_best_model
+                        and l.__class__ == self.save_metric.__class__
+                    ):
+                        if self.metric_best is None:
+                            self.metric_best = metric
+                        else:
+                            self.metric_best = self.save_fn(self.metric_best, metric)
+                            if self.metric_best == metric:
+                                self.epoch_best = epoch
         return logs
 
     def no_learning_inference(self, y, physics):
@@ -752,17 +776,14 @@ class Trainer:
         r"""
         Save the model.
 
-        It saves the model every ``ckp_interval`` epochs.
+        It saves the model every ``ckp_interval`` epochs or at the best epoch.
 
         :param int epoch: Current epoch.
         :param None, float eval_metrics: Evaluation metrics across epochs.
         :param dict state: custom objects to save with model
         """
 
-        if not self.save_path:
-            return
-
-        if (epoch > 0 and epoch % self.ckp_interval == 0) or epoch + 1 == self.epochs:
+        def save(state, best=False):
             os.makedirs(str(self.save_path), exist_ok=True)
             state = state | {
                 "epoch": epoch,
@@ -777,9 +798,18 @@ class Trainer:
             torch.save(
                 state,
                 os.path.join(
-                    Path(self.save_path), Path("ckp_{}.pth.tar".format(epoch))
+                    Path(self.save_path),
+                    Path(f"ckp_{'best' if best else str(epoch)}.pth.tar"),
                 ),
             )
+        best_model = self.save_best_model and self.epoch_best== epoch
+        if not self.save_path:
+            return
+
+        if epoch % self.ckp_interval == 0 or epoch + 1 == self.epochs:
+            save(state, best=False)
+        if best_model:
+            save(state, best=True)
 
     def reset_metrics(self):
         r"""
