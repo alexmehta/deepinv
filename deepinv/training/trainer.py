@@ -89,7 +89,7 @@ class Trainer:
         so that the same measurements are generated each epoch. Requires `shuffle=False` in dataloaders. If False, generates new physics every epoch.
         Used in conjunction with ``physics_generator``.
     :param save_metric: Metric used for saving the best model. Default is PSNR. Only used if ``eval_dataloader`` is not None and ``save_best_interval = True``.
-    :param save_fn: Function used to determine the best model. Default is max (thus will select the epoch with the maximum value for the metric). Only used if ``eval_dataloader`` is not None and ``save_best_interval = True``.
+    :param save_fn: Function used to determine the best model. Default is ```max``` (thus will select the epoch with the maximum value for the metric). Only used if ``eval_dataloader`` is not None and ``save_best_interval = True``.
     :param Metric, list[Metric] metrics: Metric or list of metrics used for evaluating the model.
         They should have ``reduction=None`` as we perform the averaging using :class:`deepinv.utils.AverageMeter` to deal with uneven batch sizes.
         :ref:`See the libraries' evaluation metrics <metric>`.
@@ -138,7 +138,7 @@ class Trainer:
     loop_physics_generator: bool = False
     metrics: Union[Metric, List[Metric]] = PSNR()
     save_metric: Metric = PSNR()
-    save_fn: Callable = max
+    save_fn: Callable = lambda x, y: max(x, y)
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_pretrained: Union[str, None] = None
     save_path: Union[str, Path] = "."
