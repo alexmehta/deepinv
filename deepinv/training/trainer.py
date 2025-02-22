@@ -803,7 +803,8 @@ class Trainer:
                     Path(f"ckp_{'best' if best else str(epoch)}.pth.tar"),
                 ),
             )
-        best_model = self.save_best_model and self.epoch_best== epoch
+
+        best_model = self.save_best_model and self.epoch_best == epoch
         if not self.save_path:
             return
 
