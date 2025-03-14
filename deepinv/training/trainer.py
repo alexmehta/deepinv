@@ -782,6 +782,8 @@ class Trainer:
                 "loss": self.loss_history,
                 "optimizer": self.optimizer.state_dict(),
             }
+            if self.scheduler is not None:
+                state["scheduler"] = self.scheduler.state_dict()
             if eval_metrics is not None:
                 state["eval_metrics"] = eval_metrics
             if self.wandb_vis:
